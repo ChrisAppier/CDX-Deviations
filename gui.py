@@ -8,12 +8,15 @@ Usage:
     python3 gui.py
 """
 
+import collections
 import csv
+import re
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
+import zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -51,6 +54,7 @@ class App(tk.Tk):
         self._reports   = []   # list[dict] from last search
         self._selected  = {}   # id -> bool (checkbox state)
         self._scan_rows = []
+        self._scan_zip_dir = None   # set at scan time; Path to dir containing scanned ZIPs
 
         # Sort state for scan treeview (column name, ascending)
         self._sort_col = "date"
@@ -339,8 +343,7 @@ class App(tk.Tk):
             bg="white", fg="#9ca3af", font=("Helvetica", 10), pady=14)
 
         # L22 — suppress canvas mousewheel when cursor is over the results tree
-        self._res_tree.bind("<Enter>", lambda _: self._canvas.unbind("<MouseWheel>"))
-        self._res_tree.bind("<Leave>", lambda _: self._canvas.bind("<MouseWheel>", self._on_mousewheel))
+        self._bind_scroll_suppression(self._res_tree)
 
     # ── Step 3: Download progress ──────────────────────────────────────────
 
@@ -388,8 +391,7 @@ class App(tk.Tk):
         self._dl_log.pack(side="left", fill="both", expand=True)
 
         # L22 — suppress canvas scroll when over log
-        self._dl_log.bind("<Enter>", lambda _: self._canvas.unbind("<MouseWheel>"))
-        self._dl_log.bind("<Leave>", lambda _: self._canvas.bind("<MouseWheel>", self._on_mousewheel))
+        self._bind_scroll_suppression(self._dl_log)
 
     # ── Step 4: Scan ───────────────────────────────────────────────────────
 
@@ -429,6 +431,13 @@ class App(tk.Tk):
             font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
             command=self._do_export_xlsx, state="disabled")
         self._btn_export_xlsx.pack(side="left", padx=4)
+        self._btn_extract = tk.Button(
+            tb, text="  Extract Files\u2026  ",
+            bg="#e5e7eb", fg="#9ca3af", relief="flat",
+            disabledforeground="#9ca3af",
+            font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
+            command=self._do_extract_files, state="disabled")
+        self._btn_extract.pack(side="left", padx=4)
         self._scan_count_lbl = tk.Label(tb, text="", bg="#f8fafc",
                                         fg="#111111", font=("Helvetica", 9))
         self._scan_count_lbl.pack(side="left", padx=12)
@@ -546,8 +555,7 @@ class App(tk.Tk):
         self._scan_tree.bind("<Double-1>", self._open_scan_result_folder)
 
         # L22/L28 — suppress canvas mousewheel when over scan treeview
-        self._scan_tree.bind("<Enter>", lambda _: self._canvas.unbind("<MouseWheel>"))
-        self._scan_tree.bind("<Leave>", lambda _: self._canvas.bind("<MouseWheel>", self._on_mousewheel))
+        self._bind_scroll_suppression(self._scan_tree)
 
         # Update sort heading indicator for default sort
         self._update_scan_sort_heading()
@@ -665,7 +673,6 @@ class App(tk.Tk):
 
     def _do_search(self, _event=None):
         # H1 — validate date fields before firing
-        import re
         date_pat = re.compile(r"^\d{2}/\d{2}/\d{4}$")
         for label, var in (("Start Date", self._start_var), ("End Date", self._end_var)):
             val = var.get().strip()
@@ -704,9 +711,7 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_search_done(self, reports):
-        # M4 — stop spinner
-        self._search_spinner.stop()
-        self._search_spinner.pack_forget()
+        self._stop_search_spinner()
 
         self._reports  = reports
         self._selected = {}
@@ -716,19 +721,8 @@ class App(tk.Tk):
         for r in reports:
             cached = (DOWNLOAD_DIR / f"{r['id']}.zip").exists()
             r["downloaded"] = cached
-            chk   = "\u2611" if cached else "\u2610"
-            iid   = self._res_tree.insert(
-                "", "end",
-                iid=r["id"],
-                values=(chk,
-                        r["facility"], r["organization"],
-                        r["city"], r["state"],
-                        r["date"][:10],
-                        r["report_type"], r["report_subtype"],
-                        r["pollutants"][:60],
-                        "Downloaded" if cached else "Pending"),
-                tags=("cached",) if cached else ())
-            self._selected[iid] = cached  # pre-select cached rows
+            self._insert_result_row(r, checked=cached, cached=cached)
+            self._selected[r["id"]] = cached  # pre-select cached rows
 
         n = len(reports)
         self._res_count_lbl.configure(
@@ -753,9 +747,7 @@ class App(tk.Tk):
         self._res_sort_asc = True
 
     def _on_search_error(self, msg):
-        # M4 — stop spinner
-        self._search_spinner.stop()
-        self._search_spinner.pack_forget()
+        self._stop_search_spinner()
 
         self._session = None   # force session rebuild next time
         self._btn_search.configure(state="normal", text="  Search WebFIRE  ")
@@ -789,18 +781,9 @@ class App(tk.Tk):
 
         self._res_tree.delete(*self._res_tree.get_children())
         for r in sorted_reports:
-            cached = r.get("downloaded", False)
-            chk    = "\u2611" if self._selected.get(r["id"], False) else "\u2610"
-            self._res_tree.insert(
-                "", "end", iid=r["id"],
-                values=(chk,
-                        r["facility"], r["organization"],
-                        r["city"], r["state"],
-                        r["date"][:10],
-                        r["report_type"], r["report_subtype"],
-                        r["pollutants"][:60],
-                        "Downloaded" if cached else "Pending"),
-                tags=("cached",) if cached else ())
+            cached  = r.get("downloaded", False)
+            checked = self._selected.get(r["id"], False)
+            self._insert_result_row(r, checked=checked, cached=cached)
 
         self._update_res_sort_heading()
 
@@ -910,18 +893,9 @@ class App(tk.Tk):
                                 "Download at least one report first.")
             return
 
-        self._btn_scan.configure(state="disabled")
-        self._btn_scan_folder.configure(state="disabled")
-        self._btn_export.configure(state="disabled",   fg="#9ca3af")
-        self._btn_export_xlsx.configure(state="disabled", fg="#9ca3af")
-        self._scan_rows = []
-        self._scan_tree.delete(*self._scan_tree.get_children())
-        self._scan_summary.pack_forget()
-        self._scan_placeholder.pack_forget()
-        self._scan_prog_frame.pack(fill="x")
-        self._scan_bar["maximum"] = len(targets)
-        self._scan_bar["value"]   = 0
-        self._scan_lbl.configure(text=f"0 / {len(targets)}")
+        self._disable_scan_buttons()
+        self._scan_zip_dir = DOWNLOAD_DIR
+        self._start_scan_ui(len(targets))
         self._set_status("Scanning reports…")
 
         def worker():
@@ -941,8 +915,7 @@ class App(tk.Tk):
         if not folder:
             return
 
-        from pathlib import Path as _P
-        zips = sorted(_P(folder).glob("*.zip"))
+        zips = sorted(Path(folder).glob("*.zip"))
         if not zips:
             messagebox.showinfo("No ZIPs found",
                                 f"No .zip files found in:\n{folder}")
@@ -975,19 +948,10 @@ class App(tk.Tk):
                 }
             targets.append((z, meta))
 
-        self._btn_scan.configure(state="disabled")
-        self._btn_scan_folder.configure(state="disabled")
-        self._btn_export.configure(state="disabled",   fg="#9ca3af")
-        self._btn_export_xlsx.configure(state="disabled", fg="#9ca3af")
-        self._scan_rows = []
-        self._scan_tree.delete(*self._scan_tree.get_children())
-        self._scan_summary.pack_forget()
-        self._scan_placeholder.pack_forget()
-        self._scan_prog_frame.pack(fill="x")
-        self._scan_bar["maximum"] = len(targets)
-        self._scan_bar["value"]   = 0
-        self._scan_lbl.configure(text=f"0 / {len(targets)}")
-        self._set_status(f"Scanning {len(targets)} ZIPs from {_P(folder).name}/…")
+        self._disable_scan_buttons()
+        self._scan_zip_dir = Path(folder)
+        self._start_scan_ui(len(targets))
+        self._set_status(f"Scanning {len(targets)} ZIPs from {Path(folder).name}/…")
 
         def worker():
             for z, rpt in targets:
@@ -1110,18 +1074,8 @@ class App(tk.Tk):
 
     # M18 — double-click opens the downloads folder in Finder/Explorer
     def _open_scan_result_folder(self, event=None):
-        iid = self._scan_tree.focus()
-        if not iid:
-            return
-        try:
-            if sys.platform == "darwin":
-                subprocess.Popen(["open", str(DOWNLOAD_DIR)])
-            elif sys.platform == "win32":
-                subprocess.Popen(["explorer", str(DOWNLOAD_DIR)])
-            else:
-                subprocess.Popen(["xdg-open", str(DOWNLOAD_DIR)])
-        except Exception:
-            pass
+        if self._scan_tree.focus():
+            self._open_folder(DOWNLOAD_DIR)
 
     # ── Scan filter / sort ─────────────────────────────────────────────────
 
@@ -1155,6 +1109,17 @@ class App(tk.Tk):
         }
         filter_dev = _RESULT_DEV_MAP.get(filter_result)
 
+        def _row_text(r):
+            return " ".join([
+                str(r.get("facility",    "")),
+                str(r.get("citation",    "")),
+                str(r.get("pollutant",   "")),
+                str(r.get("sheet",       "")),
+                str(r.get("location",    "")),
+                str(r.get("description", "")),
+                str(r.get("error",       "")),
+            ]).lower()
+
         groups: dict[str, list] = {}
         for row in self._scan_rows:
             rid = str(row.get("report_id", ""))
@@ -1168,16 +1133,6 @@ class App(tk.Tk):
                 matched = rows[:]
 
             if filter_text:
-                def _row_text(r):
-                    return " ".join([
-                        str(r.get("facility",    "")),
-                        str(r.get("citation",    "")),
-                        str(r.get("pollutant",   "")),
-                        str(r.get("sheet",       "")),
-                        str(r.get("location",    "")),
-                        str(r.get("description", "")),
-                        str(r.get("error",       "")),
-                    ]).lower()
                 facility_match = filter_text in str(rows[0].get("facility", "")).lower()
                 matched = [r for r in matched
                            if facility_match or filter_text in _row_text(r)]
@@ -1245,6 +1200,7 @@ class App(tk.Tk):
         if self._scan_rows:
             self._btn_export.configure(state="normal",      fg="#374151")
             self._btn_export_xlsx.configure(state="normal", fg="#374151")
+            self._btn_extract.configure(state="normal",     fg="#374151")
 
         # M26 — update window title with summary
         self.title(
@@ -1402,6 +1358,177 @@ class App(tk.Tk):
                 "Save Failed",
                 f"Cannot write to {path}\n\nIs the file open in Excel?")
 
+    # ── Extract Files ──────────────────────────────────────────────────────
+
+    def _do_extract_files(self):
+        if not self._scan_rows:
+            return
+        if self._scan_zip_dir is None:
+            messagebox.showerror("Extract Error",
+                                 "No scan directory known. Run a scan first.")
+            return
+
+        dest = filedialog.askdirectory(
+            title="Choose destination folder for extracted files",
+            initialdir=str(Path.home()))
+        if not dest:
+            return
+        dest = Path(dest)
+
+        # Group findings by report_id
+        groups: dict = collections.defaultdict(list)
+        for row in self._scan_rows:
+            groups[str(row.get("report_id", ""))].append(row)
+
+        # Build extraction plan
+        plan = []
+        for rid, rows in groups.items():
+            zip_path = self._scan_zip_dir / f"{rid}.zip"
+            subfolder = _aggregate_report_status(rows)
+            plan.append((rid, zip_path, subfolder))
+
+        if not plan:
+            return
+
+        # Create the three destination subfolders
+        for name in ("Deviations", "Manual Review", "No Deviations"):
+            (dest / name).mkdir(parents=True, exist_ok=True)
+
+        # Progress dialog
+        dialog = tk.Toplevel(self)
+        dialog.title("Extracting Files")
+        dialog.geometry("380x130")
+        dialog.resizable(False, False)
+        dialog.configure(bg="white")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        tk.Frame(dialog, bg=C_HEADER, height=4).pack(fill="x")
+        progress_lbl = tk.Label(dialog, text=f"Processing 0 / {len(plan)}…",
+                                bg="white", fg="#374151",
+                                font=("Helvetica", 10))
+        progress_lbl.pack(pady=(14, 6))
+        progress_bar = ttk.Progressbar(dialog, mode="determinate",
+                                       maximum=len(plan), length=320)
+        progress_bar.pack()
+
+        cancel_event = threading.Event()
+
+        def _on_cancel():
+            cancel_event.set()
+            dialog.destroy()
+
+        tk.Button(dialog, text="Cancel", bg="#e5e7eb", fg="#374151",
+                  font=("Helvetica", 9), relief="flat", padx=10, pady=3,
+                  cursor="hand2", command=_on_cancel).pack(pady=10)
+
+        errors = []
+        extracted_counts = {"Deviations": 0, "Manual Review": 0, "No Deviations": 0}
+
+        def _update_progress(done):
+            if not cancel_event.is_set() and dialog.winfo_exists():
+                progress_bar["value"] = done
+                progress_lbl.configure(text=f"Processing {done} / {len(plan)}…")
+
+        def _on_done():
+            if dialog.winfo_exists():
+                dialog.destroy()
+            total = sum(extracted_counts.values())
+            lines = [
+                f"Extraction complete — {total} of {len(plan)} reports extracted.",
+                f"  Deviations:    {extracted_counts['Deviations']} report(s)",
+                f"  Manual Review: {extracted_counts['Manual Review']} report(s)",
+                f"  No Deviations: {extracted_counts['No Deviations']} report(s)",
+            ]
+            if errors:
+                lines.append(f"\n{len(errors)} error(s):")
+                lines.extend(f"  {e}" for e in errors[:10])
+                if len(errors) > 10:
+                    lines.append(f"  …and {len(errors) - 10} more")
+            messagebox.showinfo("Extraction Complete", "\n".join(lines))
+            self._set_status(f"Extracted {total} reports → {dest.name}/")
+            if messagebox.askyesno("Open Folder?",
+                                   f"Open destination folder in Finder/Explorer?\n{dest}"):
+                self._open_folder(dest)
+
+        def worker():
+            for i, (rid, zip_path, subfolder) in enumerate(plan):
+                if cancel_event.is_set():
+                    break
+                target_dir = dest / subfolder
+                if not zip_path.exists():
+                    errors.append(f"{rid}: ZIP not found at {zip_path}")
+                    self.after(0, lambda i=i: _update_progress(i + 1))
+                    continue
+                try:
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        for member in zf.namelist():
+                            original_name = Path(member).name
+                            if not original_name:   # skip directory entries
+                                continue
+                            out_path = target_dir / f"{rid}_{original_name}"
+                            out_path.write_bytes(zf.read(member))
+                    extracted_counts[subfolder] += 1
+                except zipfile.BadZipFile:
+                    errors.append(f"{rid}: corrupt or invalid ZIP")
+                except Exception as exc:
+                    errors.append(f"{rid}: {exc}")
+                self.after(0, lambda i=i: _update_progress(i + 1))
+            self.after(0, _on_done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ── Shared UI helpers ──────────────────────────────────────────────────
+
+    def _open_folder(self, path: Path):
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            elif sys.platform == "win32":
+                subprocess.Popen(["explorer", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception:
+            pass
+
+    def _bind_scroll_suppression(self, widget):
+        widget.bind("<Enter>", lambda _: self._canvas.unbind("<MouseWheel>"))
+        widget.bind("<Leave>", lambda _: self._canvas.bind("<MouseWheel>", self._on_mousewheel))
+
+    def _stop_search_spinner(self):
+        self._search_spinner.stop()
+        self._search_spinner.pack_forget()
+
+    def _disable_scan_buttons(self):
+        self._btn_scan.configure(state="disabled")
+        self._btn_scan_folder.configure(state="disabled")
+        for btn in (self._btn_export, self._btn_export_xlsx, self._btn_extract):
+            btn.configure(state="disabled", fg="#9ca3af")
+
+    def _start_scan_ui(self, n_targets: int):
+        """Reset and show scan progress UI; caller sets _scan_zip_dir and status."""
+        self._scan_rows = []
+        self._scan_tree.delete(*self._scan_tree.get_children())
+        self._scan_summary.pack_forget()
+        self._scan_placeholder.pack_forget()
+        self._scan_prog_frame.pack(fill="x")
+        self._scan_bar["maximum"] = n_targets
+        self._scan_bar["value"]   = 0
+        self._scan_lbl.configure(text=f"0 / {n_targets}")
+
+    def _insert_result_row(self, r: dict, checked: bool, cached: bool):
+        chk = "\u2611" if checked else "\u2610"
+        self._res_tree.insert(
+            "", "end", iid=r["id"],
+            values=(chk,
+                    r["facility"], r["organization"],
+                    r["city"], r["state"],
+                    r["date"][:10],
+                    r["report_type"], r["report_subtype"],
+                    r["pollutants"][:60],
+                    "Downloaded" if cached else "Pending"),
+            tags=("cached",) if cached else ())
+
     # ── Help / About (M27) ─────────────────────────────────────────────────
 
     def _show_help(self):
@@ -1448,6 +1575,17 @@ class App(tk.Tk):
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+def _aggregate_report_status(rows: list) -> str:
+    """Return extraction subfolder name for a group of findings from one report.
+    Priority: YES > manual-review > error > no/no limit/count-only
+    """
+    devs = {r.get("deviation", "") for r in rows}
+    if "YES"           in devs: return "Deviations"
+    if "manual-review" in devs: return "Manual Review"
+    if "error"         in devs: return "Manual Review"
+    return "No Deviations"
+
 
 def _agg_result_rank(rows: list) -> int:
     devs = {r.get("deviation", "") for r in rows}

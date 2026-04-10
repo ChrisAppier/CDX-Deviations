@@ -504,6 +504,19 @@ _ANCHOR_FIELD_NAMES = frozenset({
 })
 
 
+def _is_data_row(row) -> bool:
+    """Return True if this row contains real data (non-null, non-example)."""
+    non_null = [v for v in row if v is not None and str(v).strip()]
+    if not non_null:
+        return False
+    return not all(str(v).strip().lower().startswith("e.g.") for v in non_null)
+
+
+def _row_cell(row, col: int):
+    """Return row[col], or None if col is out of bounds."""
+    return row[col] if col < len(row) else None
+
+
 def _find_data_start(rows: list) -> tuple:
     """
     Locate the CEDRI header anchor row.
@@ -666,21 +679,15 @@ def _scan_fenceline_sheet(ws_rows: list, report_meta: dict, citation: str) -> li
     # Collect readings for Regular Monitor samplers only
     readings: dict[str, list[float]] = {}
     for row in ws_rows[data_start:]:
-        non_null = [v for v in row if v is not None and str(v).strip()]
-        if not non_null:
-            continue
-        if all(str(v).strip().lower().startswith("e.g.") for v in non_null):
+        if not _is_data_row(row):
             continue
 
-        def _cell(col):
-            return row[col] if col < len(row) else None
-
-        stype = str(_cell(sampler_type_col) or "").strip()
+        stype = str(_row_cell(row, sampler_type_col) or "").strip()
         if "regular monitor" not in stype.lower():
             continue
 
-        sname   = str(_cell(sampler_name_col) or "").strip()
-        benzene = _coerce_float(_cell(benzene_col))
+        sname   = str(_row_cell(row, sampler_name_col) or "").strip()
+        benzene = _coerce_float(_row_cell(row, benzene_col))
         if sname and benzene is not None:
             readings.setdefault(sname, []).append(benzene)
 
@@ -741,18 +748,12 @@ def _scan_turbine_sheet(ws_rows: list, report_meta: dict, citation: str) -> list
     engine_hours: dict[str, float] = {}
 
     for row in ws_rows[data_start:]:
-        non_null = [v for v in row if v is not None and str(v).strip()]
-        if not non_null:
-            continue
-        if all(str(v).strip().lower().startswith("e.g.") for v in non_null):
+        if not _is_data_row(row):
             continue
 
-        def _cell(col):
-            return row[col] if col < len(row) else None
-
-        eng     = str(_cell(eng_col) or "").strip()
-        start   = _combine_datetime(_cell(sd_col), _cell(st_col))
-        end     = _combine_datetime(_cell(ed_col), _cell(et_col))
+        eng     = str(_row_cell(row, eng_col) or "").strip()
+        start   = _combine_datetime(_row_cell(row, sd_col), _row_cell(row, st_col))
+        end     = _combine_datetime(_row_cell(row, ed_col), _row_cell(row, et_col))
 
         if not eng or start is None or end is None:
             continue
@@ -807,14 +808,7 @@ def _scan_aer_sheet(rows: list, sheet_name: str) -> dict:
         return _scan_aer_sheet_heuristic(rows, sheet_name)
 
     # Collect actual data rows (non-null, non-example)
-    data_rows = []
-    for row in rows[data_start:]:
-        non_null = [v for v in row if v is not None and str(v).strip()]
-        if not non_null:
-            continue
-        if all(str(v).strip().lower().startswith("e.g.") for v in non_null):
-            continue
-        data_rows.append(row)
+    data_rows = [row for row in rows[data_start:] if _is_data_row(row)]
 
     if not data_rows:
         return {"deviation": "no", "description": ""}
@@ -861,14 +855,7 @@ def _scan_aer_sheet_heuristic(rows: list, sheet_name: str) -> dict:
     Fallback scanner for sheets without a RecordId anchor.
     Looks for any non-empty rows past a short header block (first 20 rows).
     """
-    data_rows = []
-    for row in rows[20:]:
-        non_null = [v for v in row if v is not None and str(v).strip()]
-        if not non_null:
-            continue
-        if all(str(v).strip().lower().startswith("e.g.") for v in non_null):
-            continue
-        data_rows.append(row)
+    data_rows = [row for row in rows[20:] if _is_data_row(row)]
 
     if data_rows:
         return {
@@ -1076,6 +1063,55 @@ def scan_aer_report(local_path: Path, report_meta: dict) -> list:
     return rows
 
 
+# ---------------------------------------------------------------------------
+# Row builder helpers
+# ---------------------------------------------------------------------------
+
+def _error_row(meta: dict, msg: str) -> dict:
+    """Build a generic ST error row."""
+    return {
+        "report_id":    meta["id"],
+        "facility":     meta["facility"],
+        "city":         meta["city"],
+        "state":        meta["state"],
+        "date":         meta["date"],
+        "report_type":  meta["report_type"],
+        "location":     "",
+        "pollutant":    "",
+        "unit":         "",
+        "n_runs":       "",
+        "avg_measured": "",
+        "limit":        "",
+        "pct_of_limit": "",
+        "regulation":   "",
+        "deviation":    "error",
+        "error":        msg,
+    }
+
+
+def _st_row(meta: dict, loc: str, poll: str, unit: str,
+            n_runs: int, avg: float, lim, reg: str) -> dict:
+    """Build a Stack Test result row."""
+    return {
+        "report_id":    meta["id"],
+        "facility":     meta["facility"],
+        "city":         meta["city"],
+        "state":        meta["state"],
+        "date":         meta["date"],
+        "report_type":  meta.get("report_type", "ST"),
+        "location":     loc,
+        "pollutant":    poll,
+        "unit":         unit,
+        "n_runs":       n_runs,
+        "avg_measured": round(avg, 6),
+        "limit":        lim if lim is not None else "",
+        "pct_of_limit": round(avg / lim * 100, 1) if lim else "",
+        "regulation":   reg,
+        "deviation":    ("YES" if avg > lim else "no") if lim is not None else "no limit",
+        "error":        "",
+    }
+
+
 def _aer_row(meta: dict, citation: str, sheet: str,
              deviation: str, description: str,
              fallback_used: bool = False,
@@ -1213,24 +1249,7 @@ def _scan_st_tbl_emis(root, tbl_concs: list, report_meta: dict) -> list:
             continue
         seen.add(dedup_key)
 
-        rows.append({
-            "report_id":    report_meta["id"],
-            "facility":     report_meta["facility"],
-            "city":         report_meta["city"],
-            "state":        report_meta["state"],
-            "date":         report_meta["date"],
-            "report_type":  report_meta.get("report_type", "ST"),
-            "location":     loc,
-            "pollutant":    poll,
-            "unit":         lunit,
-            "n_runs":       1,
-            "avg_measured": round(val, 6),
-            "limit":        lim if lim is not None else "",
-            "pct_of_limit": round(val / lim * 100, 1) if lim else "",
-            "regulation":   reg,
-            "deviation":    ("YES" if val > lim else "no") if lim is not None else "no limit",
-            "error":        "",
-        })
+        rows.append(_st_row(report_meta, loc, poll, lunit, 1, val, lim, reg))
 
     if not rows:
         return [_error_row(report_meta,
@@ -1331,24 +1350,7 @@ def _scan_st_report(local_path: Path, report_meta: dict) -> list:
                     reg = _elem_text(elem, "Part_SubPart")
                     break
 
-        rows.append({
-            "report_id":    report_meta["id"],
-            "facility":     report_meta["facility"],
-            "city":         report_meta["city"],
-            "state":        report_meta["state"],
-            "date":         report_meta["date"],
-            "report_type":  report_meta["report_type"],
-            "location":     loc,
-            "pollutant":    poll,
-            "unit":         unit,
-            "n_runs":       len(vals),
-            "avg_measured": round(avg, 6),
-            "limit":        lim if lim is not None else "",
-            "pct_of_limit": round(avg / lim * 100, 1) if lim else "",
-            "regulation":   reg,
-            "deviation":    ("YES" if avg > lim else "no") if lim is not None else "no limit",
-            "error":        "",
-        })
+        rows.append(_st_row(report_meta, loc, poll, unit, len(vals), avg, lim, reg))
 
     return rows
 
@@ -1393,24 +1395,3 @@ def scan_report(local_path: Path, report_meta: dict) -> list:
 
     # ST or UNKNOWN: attempt XML scan (existing logic)
     return _scan_st_report(local_path, report_meta)
-
-
-def _error_row(meta: dict, msg: str) -> dict:
-    return {
-        "report_id":    meta["id"],
-        "facility":     meta["facility"],
-        "city":         meta["city"],
-        "state":        meta["state"],
-        "date":         meta["date"],
-        "report_type":  meta["report_type"],
-        "location":     "",
-        "pollutant":    "",
-        "unit":         "",
-        "n_runs":       "",
-        "avg_measured": "",
-        "limit":        "",
-        "pct_of_limit": "",
-        "regulation":   "",
-        "deviation":    "error",
-        "error":        msg,
-    }
