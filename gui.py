@@ -404,11 +404,13 @@ class App(tk.Tk):
         tb = tk.Frame(body, bg="#f8fafc", pady=6, padx=10)
         tb.pack(fill="x")
         # H16 — scan button starts disabled; enabled when ZIPs exist
+        # H16 — start disabled; use state="normal"+no-op to avoid macOS Aqua
+        #        overriding text color when state="disabled"
         self._btn_scan = tk.Button(
             tb, text="  \U0001f50d  Scan for Deviations  ",
-            bg=C_BTN_AMB, fg="white", activebackground="#b45309",
-            font=("Helvetica", 10, "bold"), relief="flat", cursor="hand2",
-            padx=6, pady=4, command=self._do_scan, state="disabled")
+            bg=C_BTN_AMB, fg="white", activebackground=C_BTN_AMB,
+            font=("Helvetica", 10, "bold"), relief="flat", cursor="arrow",
+            padx=6, pady=4, command=lambda: None)
         self._btn_scan.pack(side="left")
         self._btn_scan_folder = tk.Button(
             tb, text="  \U0001f4c2  Scan Local Folder\u2026  ",
@@ -419,22 +421,22 @@ class App(tk.Tk):
         # M21 — explicit disabled fg for export buttons
         self._btn_export = tk.Button(
             tb, text="  Export CSV  ",
-            bg="#e5e7eb", fg="#9ca3af", relief="flat",
-            disabledforeground="#9ca3af",
+            bg="#e5e7eb", fg="#6b7280", relief="flat",
+            disabledforeground="#6b7280",
             font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
             command=self._do_export, state="disabled")
         self._btn_export.pack(side="left", padx=4)
         self._btn_export_xlsx = tk.Button(
             tb, text="  Export XLSX  ",
-            bg="#e5e7eb", fg="#9ca3af", relief="flat",
-            disabledforeground="#9ca3af",
+            bg="#e5e7eb", fg="#6b7280", relief="flat",
+            disabledforeground="#6b7280",
             font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
             command=self._do_export_xlsx, state="disabled")
         self._btn_export_xlsx.pack(side="left", padx=4)
         self._btn_extract = tk.Button(
             tb, text="  Extract Files\u2026  ",
-            bg="#e5e7eb", fg="#9ca3af", relief="flat",
-            disabledforeground="#9ca3af",
+            bg="#e5e7eb", fg="#6b7280", relief="flat",
+            disabledforeground="#6b7280",
             font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
             command=self._do_extract_files, state="disabled")
         self._btn_extract.pack(side="left", padx=4)
@@ -608,7 +610,12 @@ class App(tk.Tk):
     # H16 — enable/disable scan button based on whether ZIPs exist
     def _refresh_scan_button_state(self):
         has_zips = any(DOWNLOAD_DIR.glob("*.zip"))
-        self._btn_scan.configure(state="normal" if has_zips else "disabled")
+        if has_zips:
+            self._btn_scan.configure(command=self._do_scan,
+                                     cursor="hand2", activebackground="#b45309")
+        else:
+            self._btn_scan.configure(command=lambda: None,
+                                     cursor="arrow", activebackground=C_BTN_AMB)
 
     # ── Sort helpers ───────────────────────────────────────────────────────
 
@@ -1195,7 +1202,8 @@ class App(tk.Tk):
 
         self._scan_summary.configure(text=msg, fg=color)
         self._scan_summary.pack(fill="x")
-        self._btn_scan.configure(state="normal")
+        self._btn_scan.configure(command=self._do_scan,
+                                 cursor="hand2", activebackground="#b45309")
         self._btn_scan_folder.configure(state="normal")
         if self._scan_rows:
             self._btn_export.configure(state="normal",      fg="#374151")
@@ -1502,10 +1510,11 @@ class App(tk.Tk):
         self._search_spinner.pack_forget()
 
     def _disable_scan_buttons(self):
-        self._btn_scan.configure(state="disabled")
+        self._btn_scan.configure(command=lambda: None,
+                                 cursor="arrow", activebackground=C_BTN_AMB)
         self._btn_scan_folder.configure(state="disabled")
         for btn in (self._btn_export, self._btn_export_xlsx, self._btn_extract):
-            btn.configure(state="disabled", fg="#9ca3af")
+            btn.configure(state="disabled", fg="#6b7280")
 
     def _start_scan_ui(self, n_targets: int):
         """Reset and show scan progress UI; caller sets _scan_zip_dir and status."""
