@@ -11,6 +11,7 @@ Usage:
 import collections
 import csv
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -57,8 +58,8 @@ class App(tk.Tk):
         self._scan_zip_dir = None   # set at scan time; Path to dir containing scanned ZIPs
 
         # Sort state for scan treeview (column name, ascending)
-        self._sort_col = "date"
-        self._sort_asc = False
+        self._sort_col = "result"
+        self._sort_asc = True
 
         # Sort state for results treeview
         self._res_sort_col = None
@@ -447,7 +448,7 @@ class App(tk.Tk):
         # ── Filter bar ───────────────────────────────────────────────────────
         fb = tk.Frame(body, bg="#eef1f5", pady=5, padx=10)
         fb.pack(fill="x")
-        tk.Label(fb, text="Search (facility, pollutant, notes):",  # M19
+        tk.Label(fb, text="Search (facility, citation, sheet, notes — shows matching reports):",
                  bg="#eef1f5", fg="#111111",
                  font=("Helvetica", 9, "bold")).pack(side="left")
         self._filter_var = tk.StringVar()
@@ -520,7 +521,7 @@ class App(tk.Tk):
         swidths = {"result": 80, "facility": 180, "st": 36, "date": 90,
                    "type": 52, "location": 90, "pollutant": 180,
                    "measured": 80, "limit": 70, "pct": 68,
-                   "notes": 220}
+                   "notes": 300}
         for c in scols:
             self._scan_tree.heading(
                 c, text=self._scan_heads[c],
@@ -553,7 +554,7 @@ class App(tk.Tk):
             bg="white", fg="#9ca3af", font=("Helvetica", 10), pady=16)
         self._scan_placeholder.pack()
 
-        # M18 — double-click opens the downloads folder
+        # M18 — double-click opens the report document
         self._scan_tree.bind("<Double-1>", self._open_scan_result_folder)
 
         # L22/L28 — suppress canvas mousewheel when over scan treeview
@@ -891,10 +892,37 @@ class App(tk.Tk):
     # ── Scan ───────────────────────────────────────────────────────────────
 
     def _do_scan(self):
-        targets = [
-            r for r in self._reports
-            if (DOWNLOAD_DIR / f"{r['id']}.zip").exists()
-        ]
+        if self._scan_rows:
+            if not messagebox.askyesno("Rescan?",
+                    f"This will replace {len(self._scan_rows)} existing findings.\nContinue?"):
+                return
+
+        zips_in_dir = sorted(DOWNLOAD_DIR.glob("*.zip"))
+        targets = []
+        known = {r["id"]: r for r in self._reports}
+        for z in zips_in_dir:
+            rid = z.stem
+            if rid in known:
+                targets.append(known[rid])
+            else:
+                rtype     = core.classify_report(z)
+                file_meta = core.extract_file_meta(z)
+                targets.append({
+                    "id":             rid,
+                    "facility":       file_meta["facility"] or rid,
+                    "city":           file_meta["city"],
+                    "state":          file_meta["state"],
+                    "date":           "",
+                    "report_type":    rtype,
+                    "organization":   "",
+                    "county":         "",
+                    "report_subtype": "",
+                    "pollutants":     "",
+                    "downloaded":     True,
+                    "scanned":        False,
+                    "_zip_path":      str(z),
+                })
+
         if not targets:
             messagebox.showinfo("Nothing to scan",
                                 "Download at least one report first.")
@@ -981,11 +1009,13 @@ class App(tk.Tk):
         flagged     = sum(1 for r in self._scan_rows if r.get("deviation") == "YES")
         need_review = sum(1 for r in self._scan_rows if r.get("deviation") == "manual-review")
         n           = len(self._scan_rows)
+        n_reports     = len({r["report_id"] for r in self._scan_rows})
+        n_dev_reports = len({r["report_id"] for r in self._scan_rows if r.get("deviation") == "YES"})
         review_str  = f"  ·  {need_review} need review" if need_review else ""
         self._scan_count_lbl.configure(
-            text=f"{n} finding{'s' if n != 1 else ''}  ·  "
-                 f"{flagged} deviation{'s' if flagged != 1 else ''} flagged"
-                 f"{review_str}")
+            text=f"{n} finding{'s' if n != 1 else ''} from {n_reports} report{'s' if n_reports != 1 else ''}"
+                 + (f"  ·  {n_dev_reports} report{'s' if n_dev_reports != 1 else ''} with deviations" if n_dev_reports else "")
+                 + review_str)
 
     def _insert_report_group(self, rows: list, parent_iid: str = ""):
         if not rows:
@@ -1017,10 +1047,11 @@ class App(tk.Tk):
         if n_pass:     parts.append(f"{n_pass} Pass")
         parent_notes = (f"{len(rows)} findings — " + ", ".join(parts)) if len(rows) > 1 else ""
 
+        auto_open = bool(deviations or reviews)
         self._scan_tree.insert(
-            parent_iid, "end", iid=report_id, open=True,
+            parent_iid, "end", iid=report_id, open=auto_open,
             values=(agg_result,
-                    first.get("facility", "")[:40],
+                    first.get("facility", ""),
                     first.get("state", ""),
                     str(first.get("date", ""))[:10],
                     first.get("report_type", ""),
@@ -1079,9 +1110,45 @@ class App(tk.Tk):
                         notes_val),
                 tags=(child_tag,) if child_tag else ())
 
-    # M18 — double-click opens the downloads folder in Finder/Explorer
+    # M18 — double-click opens the actual report document
     def _open_scan_result_folder(self, event=None):
-        if self._scan_tree.focus():
+        iid = self._scan_tree.focus()
+        if not iid:
+            return
+
+        # Derive report_id: parent rows use report_id as iid; child rows use "{id}_cN"
+        parent = self._scan_tree.parent(iid)
+        report_id = parent if parent else iid
+
+        if self._scan_zip_dir is None:
+            self._open_folder(DOWNLOAD_DIR)
+            return
+
+        zip_path = self._scan_zip_dir / f"{report_id}.zip"
+        if not zip_path.exists():
+            self._open_folder(DOWNLOAD_DIR)
+            return
+
+        # Extract to a per-report temp directory and open the main document
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix=f"cdx_{report_id}_"))
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(tmp)
+            all_files = [f for f in tmp.rglob("*") if f.is_file()]
+            to_open = [f for f in all_files if f.suffix.lower() in (".pdf", ".xlsx", ".xlsm")]
+            if not to_open:
+                # Fallback to XML if no PDF/spreadsheet found
+                to_open = [f for f in all_files if f.suffix.lower() == ".xml"]
+            if to_open:
+                for f in to_open:
+                    self._open_file(f)
+                self.after(10_000, lambda t=tmp: shutil.rmtree(t, ignore_errors=True))
+                return
+            # Fallback: open the extracted folder
+            self._open_folder(tmp)
+            self.after(10_000, lambda t=tmp: shutil.rmtree(t, ignore_errors=True))
+        except Exception:
             self._open_folder(DOWNLOAD_DIR)
 
     # ── Scan filter / sort ─────────────────────────────────────────────────
@@ -1111,7 +1178,6 @@ class App(tk.Tk):
         _RESULT_DEV_MAP = {
             "Deviations":    "YES",
             "Manual Review": "manual-review",
-            "Pass":          "no",
             "Errors":        "error",
         }
         filter_dev = _RESULT_DEV_MAP.get(filter_result)
@@ -1134,7 +1200,9 @@ class App(tk.Tk):
 
         filtered_groups = []
         for rid, rows in groups.items():
-            if filter_dev:
+            if filter_result == "Pass":
+                matched = [r for r in rows if r.get("deviation") in ("no", "no limit")]
+            elif filter_dev:
                 matched = [r for r in rows if r.get("deviation") == filter_dev]
             else:
                 matched = rows[:]
@@ -1187,9 +1255,14 @@ class App(tk.Tk):
         if flagged:
             review_note = (f"  |  {need_review} require manual review"  # M17
                            if need_review else "")
+            dev_facilities = list(dict.fromkeys(
+                r["facility"] for r in self._scan_rows if r.get("deviation") == "YES"))
+            fac_str = ", ".join(dev_facilities[:4])
+            if len(dev_facilities) > 4:
+                fac_str += f" + {len(dev_facilities) - 4} more"
             msg   = (f"\u26a0  {flagged} potential deviation"
                      f"{'s' if flagged != 1 else ''} flagged — "
-                     f"review highlighted rows{review_note}")
+                     f"{fac_str}{review_note}")
             color = C_DEV_FG
         elif need_review:
             msg   = (f"\u26a0  {need_review} report"
@@ -1216,17 +1289,68 @@ class App(tk.Tk):
             + (f"  |  {flagged} deviation{'s' if flagged != 1 else ''}" if flagged else ""))
 
         self._set_status(f"Scan complete — {n} findings, {flagged} flagged")
+        if flagged:
+            self._filter_result_var.set("Deviations")
         self._apply_scan_filter()
+        self._scan_tree.focus_set()
+
+    # ── Export helpers ─────────────────────────────────────────────────────
+
+    def _get_filtered_rows(self):
+        """Return rows matching the current filter state, preserving sort order."""
+        filter_result = self._filter_result_var.get() if self._filter_result_var else "All"
+        filter_text   = (self._filter_var.get() if self._filter_var else "").lower().strip()
+        _RESULT_DEV_MAP = {
+            "Deviations":    "YES",
+            "Manual Review": "manual-review",
+            "Errors":        "error",
+        }
+        filter_dev = _RESULT_DEV_MAP.get(filter_result)
+
+        def _row_text(r):
+            return " ".join([
+                str(r.get("facility",    "")),
+                str(r.get("citation",    "")),
+                str(r.get("pollutant",   "")),
+                str(r.get("sheet",       "")),
+                str(r.get("location",    "")),
+                str(r.get("description", "")),
+                str(r.get("error",       "")),
+            ]).lower()
+
+        result = []
+        groups: dict[str, list] = {}
+        for row in self._scan_rows:
+            rid = str(row.get("report_id", ""))
+            groups.setdefault(rid, []).append(row)
+
+        for rid, rows in groups.items():
+            if filter_result == "Pass":
+                matched = [r for r in rows if r.get("deviation") in ("no", "no limit")]
+            elif filter_dev:
+                matched = [r for r in rows if r.get("deviation") == filter_dev]
+            else:
+                matched = rows[:]
+            if filter_text:
+                facility_match = filter_text in str(rows[0].get("facility", "")).lower()
+                matched = [r for r in matched
+                           if facility_match or filter_text in _row_text(r)]
+            result.extend(matched)
+        return result
 
     # ── Export CSV ─────────────────────────────────────────────────────────
 
     def _do_export(self):
         if not self._scan_rows:
             return
+        rows_to_export = self._get_filtered_rows()
+        filter_result  = self._filter_result_var.get() if self._filter_result_var else "All"
+        default_name   = (f"{filter_result.lower().replace(' ', '_')}_filtered.csv"
+                          if filter_result != "All" else "deviations.csv")
         path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            initialfile="deviations.csv",
+            initialfile=default_name,
             title="Save scan results")
         if not path:
             return
@@ -1240,8 +1364,8 @@ class App(tk.Tk):
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             writer.writeheader()
-            writer.writerows(self._scan_rows)
-        self._set_status(f"Exported {len(self._scan_rows)} rows → {Path(path).name}")
+            writer.writerows(rows_to_export)
+        self._set_status(f"Exported {len(rows_to_export)} rows → {Path(path).name}")
 
     # ── Export XLSX ────────────────────────────────────────────────────────
 
@@ -1257,10 +1381,13 @@ class App(tk.Tk):
                 "openpyxl is required for XLSX export.\n\nRun:  pip install openpyxl")
             return
 
+        filter_result  = self._filter_result_var.get() if self._filter_result_var else "All"
+        default_name   = (f"{filter_result.lower().replace(' ', '_')}_filtered.xlsx"
+                          if filter_result != "All" else "deviations.xlsx")
         path = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
             filetypes=[("Excel workbook", "*.xlsx"), ("All files", "*.*")],
-            initialfile="deviations.xlsx",
+            initialfile=default_name,
             title="Save scan results as Excel workbook")
         if not path:
             return
@@ -1310,13 +1437,19 @@ class App(tk.Tk):
             ("description",  "Description",           40),
         ]
 
-        tab_defs = [
-            ("Deviations",    [r for r in self._scan_rows if r.get("deviation") == "YES"],            ALL_COLS),
-            ("Manual Review", [r for r in self._scan_rows if r.get("deviation") == "manual-review"],  ALL_COLS),  # M17
-            ("Errors",        [r for r in self._scan_rows if r.get("deviation") == "error"],           ALL_COLS),
-            ("Pass",          [r for r in self._scan_rows if r.get("deviation") == "no"],              ALL_COLS),
-            ("All Results",   self._scan_rows,                                                         ALL_COLS),
-        ]
+        filtered_rows = self._get_filtered_rows()
+        if filter_result != "All":
+            tab_defs = [
+                (filter_result, filtered_rows, ALL_COLS),
+            ]
+        else:
+            tab_defs = [
+                ("Deviations",    [r for r in self._scan_rows if r.get("deviation") == "YES"],            ALL_COLS),
+                ("Manual Review", [r for r in self._scan_rows if r.get("deviation") == "manual-review"],  ALL_COLS),  # M17
+                ("Errors",        [r for r in self._scan_rows if r.get("deviation") == "error"],           ALL_COLS),
+                ("Pass",          [r for r in self._scan_rows if r.get("deviation") == "no"],              ALL_COLS),
+                ("All Results",   self._scan_rows,                                                         ALL_COLS),
+            ]
 
         HDR_FILL = PatternFill("solid", fgColor="1A3A5C")
         HDR_FONT = Font(color="FFFFFF", bold=True, size=10)
@@ -1360,7 +1493,7 @@ class App(tk.Tk):
 
         try:
             wb.save(path)
-            self._set_status(f"Exported {len(self._scan_rows)} rows → {Path(path).name}")
+            self._set_status(f"Exported {len(filtered_rows)} rows → {Path(path).name}")
         except PermissionError:
             messagebox.showerror(
                 "Save Failed",
@@ -1489,6 +1622,17 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     # ── Shared UI helpers ──────────────────────────────────────────────────
+
+    def _open_file(self, path: Path):
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            elif sys.platform == "win32":
+                subprocess.Popen(["start", "", str(path)], shell=True)
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception:
+            pass
 
     def _open_folder(self, path: Path):
         try:
