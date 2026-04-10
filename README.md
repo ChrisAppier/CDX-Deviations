@@ -9,9 +9,7 @@ A desktop tool for EPA enforcement staff to search, download, and scan complianc
 - **Search** WebFIRE's report database by facility name, organization, state, city, ZIP, date range, and CFR part/subpart
 - **Download** report ZIPs directly from WebFIRE (Stack Test and Air Emissions Report formats)
 - **Scan** downloaded reports for emission limit exceedances and deviation flags
-- **Export** results to CSV for further analysis or case documentation
-
-Currently supports Stack Test (ST) reports submitted via ERT. Air Emissions Report (AER) support — including semiannual compliance reports and deviation reports submitted via CEDRI — is under active development.
+- **Export** results to CSV or XLSX for further analysis or case documentation
 
 ---
 
@@ -19,7 +17,14 @@ Currently supports Stack Test (ST) reports submitted via ERT. Air Emissions Repo
 
 **Stack Tests (ST):** Working. Searches WebFIRE, downloads ERT-format ZIPs, parses XML emission run data, compares measured values against reported limits, and flags exceedances.
 
-**Air Emissions Reports (AER):** In development. CEDRI templates vary significantly by regulatory citation and subpart. Work is ongoing to map template structures and build targeted parsers for deviation-relevant report types.
+**Air Emissions Reports (AER):** Working. Parses Excel-based CEDRI templates and routes to deviation-relevant sheets based on the CitationID embedded in each report. Supports 20+ CFR citations across Parts 60 and 63, including special-purpose logic for:
+
+- **§63.655** — Fenceline benzene monitoring: computes annual average per sampler location and flags exceedances against the 9 µg/m³ action level
+- **§60.4214 / §63.4214** — Stationary combustion turbines: sums non-emergency operating hours per engine and flags exceedances of the 100-hour annual limit
+- **Summary and event-level sheets** — Detects non-zero deviation counts, durations, and percentages in CEDRI standard fields
+- **Keyword fallback** — For citations not in the routing table, scans any sheet whose name contains deviation-related keywords (deviat, excess, malfunction, downtime)
+
+Reports that require manual review (NSPS OOOOa/OOOOb leak records, tune-up reports) are flagged accordingly rather than auto-scanned.
 
 ---
 
@@ -50,19 +55,22 @@ openpyxl
 
 1. Launch the GUI with `python gui.py`
 2. Enter search parameters (facility name, state, date range, CFR part, etc.)
-3. Click **Search WebFIRE** — results populate with report type, subtype, and download status
+3. Click **Search WebFIRE** — results populate with report type, subtype, and download status; previously downloaded reports are pre-selected and highlighted
 4. Select reports and click **Download Selected**
-5. Click **Scan for Deviations** to analyze all downloaded reports
-6. Review flagged rows (highlighted in red) and export to CSV if needed
+5. Click **Scan for Deviations** to analyze all downloaded reports, or use **Scan Local Folder…** to scan a folder of ZIPs from a prior session
+6. Review flagged rows (red = deviation, amber = manual review) and use the filter bar to narrow by facility, pollutant, or result type
+7. Export to CSV or XLSX if needed
 
 Downloaded ZIPs are cached locally in the `downloads/` folder and reused on subsequent searches.
+
+**Keyboard shortcuts:** `Return` — search, `⌘A` — select all results, `⌘S` — export CSV, `Escape` — cancel download.
 
 ---
 
 ## Repository Structure
 
 ```
-webfire_core.py   # Search, download, and scan logic
+webfire_core.py   # Search, download, classify, and scan logic
 gui.py            # Tkinter desktop UI
 requirements.txt  # Python dependencies
 downloads/        # Local cache of downloaded report ZIPs (gitignored)
