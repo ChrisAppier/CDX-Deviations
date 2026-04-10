@@ -120,7 +120,7 @@ class App(tk.Tk):
         # M27 — Help/About button
         tk.Button(hdr, text=" ? ", bg="#2d6a9f", fg="white",
                   activebackground="#1d4ed8", font=("Helvetica", 11, "bold"),
-                  relief="flat", cursor="hand2", padx=8, pady=2,
+                  relief="flat", cursor="pointinghand", padx=8, pady=2,
                   command=self._show_help).pack(side="right", padx=12, pady=10)
 
         # ── Scrollable main canvas
@@ -248,11 +248,11 @@ class App(tk.Tk):
         self._btn_search = tk.Button(
             btn_row, text="  Search WebFIRE  ",
             bg=C_BTN_BLUE, fg="white", activebackground="#1d4ed8",
-            font=("Helvetica", 10, "bold"), relief="flat", cursor="hand2",
+            font=("Helvetica", 10, "bold"), relief="flat", cursor="pointinghand",
             padx=6, pady=5, command=self._do_search)
         self._btn_search.pack(side="left")
         tk.Button(btn_row, text="Clear", bg="#e5e7eb", fg="#374151",
-                  relief="flat", font=("Helvetica", 9), cursor="hand2",
+                  relief="flat", font=("Helvetica", 9), cursor="pointinghand",
                   padx=6, pady=5, command=self._reset_search).pack(side="left", padx=8)
         # M4 — indeterminate spinner shown during search
         self._search_spinner = ttk.Progressbar(btn_row, mode="indeterminate",
@@ -294,15 +294,15 @@ class App(tk.Tk):
                  bg="#f8fafc", fg="#16a34a",
                  font=("Helvetica", 8)).pack(side="left", padx=(8, 0))
         tk.Button(tb, text="Select All", bg="#e5e7eb", relief="flat",
-                  font=("Helvetica", 9), cursor="hand2", padx=6,
+                  font=("Helvetica", 9), cursor="pointinghand", padx=6,
                   command=self._select_all).pack(side="left", padx=(12, 4))
         tk.Button(tb, text="Clear", bg="#e5e7eb", relief="flat",
-                  font=("Helvetica", 9), cursor="hand2", padx=6,
+                  font=("Helvetica", 9), cursor="pointinghand", padx=6,
                   command=self._select_none).pack(side="left", padx=4)
         self._btn_download = tk.Button(
             tb, text="  \u2193  Download Selected  ",
             bg=C_BTN_GRN, fg="white", activebackground="#15803d",
-            font=("Helvetica", 9, "bold"), relief="flat", cursor="hand2",
+            font=("Helvetica", 9, "bold"), relief="flat", cursor="pointinghand",
             padx=6, pady=3, command=self._do_download)
         self._btn_download.pack(side="right", padx=6)
 
@@ -362,7 +362,7 @@ class App(tk.Tk):
         self._btn_cancel_dl = tk.Button(
             prog_row, text="Cancel",
             bg="#dc2626", fg="white", activebackground="#b91c1c",
-            font=("Helvetica", 9, "bold"), relief="flat", cursor="hand2",
+            font=("Helvetica", 9, "bold"), relief="flat", cursor="pointinghand",
             padx=6, pady=2, command=self._cancel_download)
         # Hidden until a download is in progress
         self._dl_cancel = False
@@ -415,7 +415,7 @@ class App(tk.Tk):
         self._btn_scan_folder = tk.Button(
             tb, text="  \U0001f4c2  Scan Local Folder\u2026  ",
             bg="#4b5563", fg="white", activebackground="#374151",
-            font=("Helvetica", 9, "bold"), relief="flat", cursor="hand2",
+            font=("Helvetica", 9, "bold"), relief="flat", cursor="pointinghand",
             padx=6, pady=4, command=self._do_scan_folder)
         self._btn_scan_folder.pack(side="left", padx=4)
         # M21 — explicit disabled fg for export buttons
@@ -423,21 +423,21 @@ class App(tk.Tk):
             tb, text="  Export CSV  ",
             bg="#e5e7eb", fg="#6b7280", relief="flat",
             disabledforeground="#6b7280",
-            font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
+            font=("Helvetica", 9), cursor="pointinghand", padx=6, pady=4,
             command=self._do_export, state="disabled")
         self._btn_export.pack(side="left", padx=4)
         self._btn_export_xlsx = tk.Button(
             tb, text="  Export XLSX  ",
             bg="#e5e7eb", fg="#6b7280", relief="flat",
             disabledforeground="#6b7280",
-            font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
+            font=("Helvetica", 9), cursor="pointinghand", padx=6, pady=4,
             command=self._do_export_xlsx, state="disabled")
         self._btn_export_xlsx.pack(side="left", padx=4)
         self._btn_extract = tk.Button(
             tb, text="  Extract Files\u2026  ",
             bg="#e5e7eb", fg="#6b7280", relief="flat",
             disabledforeground="#6b7280",
-            font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
+            font=("Helvetica", 9), cursor="pointinghand", padx=6, pady=4,
             command=self._do_extract_files, state="disabled")
         self._btn_extract.pack(side="left", padx=4)
         self._scan_count_lbl = tk.Label(tb, text="", bg="#f8fafc",
@@ -466,7 +466,7 @@ class App(tk.Tk):
         result_cb.pack(side="left", padx=4)
         result_cb.bind("<<ComboboxSelected>>", lambda _: self._apply_scan_filter())
         tk.Button(fb, text="Clear", bg="#e5e7eb", fg="#374151", relief="flat",
-                  font=("Helvetica", 9), cursor="hand2", padx=6,
+                  font=("Helvetica", 9), cursor="pointinghand", padx=6,
                   command=self._clear_filter).pack(side="left", padx=8)
 
         # L24 — fallback warning as full-width strip below filter bar;
@@ -612,7 +612,7 @@ class App(tk.Tk):
         has_zips = any(DOWNLOAD_DIR.glob("*.zip"))
         if has_zips:
             self._btn_scan.configure(command=self._do_scan,
-                                     cursor="hand2", activebackground="#b45309")
+                                     cursor="pointinghand", activebackground="#b45309")
         else:
             self._btn_scan.configure(command=lambda: None,
                                      cursor="arrow", activebackground=C_BTN_AMB)
@@ -1203,7 +1203,7 @@ class App(tk.Tk):
         self._scan_summary.configure(text=msg, fg=color)
         self._scan_summary.pack(fill="x")
         self._btn_scan.configure(command=self._do_scan,
-                                 cursor="hand2", activebackground="#b45309")
+                                 cursor="pointinghand", activebackground="#b45309")
         self._btn_scan_folder.configure(state="normal")
         if self._scan_rows:
             self._btn_export.configure(state="normal",      fg="#374151")
@@ -1428,7 +1428,7 @@ class App(tk.Tk):
 
         tk.Button(dialog, text="Cancel", bg="#e5e7eb", fg="#374151",
                   font=("Helvetica", 9), relief="flat", padx=10, pady=3,
-                  cursor="hand2", command=_on_cancel).pack(pady=10)
+                  cursor="pointinghand", command=_on_cancel).pack(pady=10)
 
         errors = []
         extracted_counts = {"Deviations": 0, "Manual Review": 0, "No Deviations": 0}
@@ -1581,7 +1581,7 @@ class App(tk.Tk):
 
         tk.Button(win, text="Close", bg=C_BTN_BLUE, fg="white",
                   font=("Helvetica", 10, "bold"), relief="flat",
-                  padx=16, pady=4, cursor="hand2",
+                  padx=16, pady=4, cursor="pointinghand",
                   command=win.destroy).pack(pady=(16, 0))
 
 
