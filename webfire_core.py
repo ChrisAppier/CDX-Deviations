@@ -286,6 +286,13 @@ def download_report(session: requests.Session, doc_id: str,
         r.raise_for_status()
         # ZIP files start with PK (0x50 0x4B). Detect bad responses early.
         if not r.content[:2] == b"PK":
+            # WebFIRE sometimes returns a bare PDF instead of a ZIP.
+            # Save it anyway (using the .zip path so the rest of the pipeline
+            # can find it); classify_report will detect it as BADDOWNLOAD_PDF
+            # and route it to Manual Review.
+            if r.content[:4] == b"%PDF":
+                dest.write_bytes(r.content)
+                return True, dest, "pdf"
             content_type = r.headers.get("Content-Type", "unknown")
             header = r.content[:8].hex()
             return False, None, (

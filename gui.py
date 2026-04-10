@@ -10,6 +10,7 @@ Usage:
 
 import collections
 import csv
+import json
 import os
 import re
 import shutil
@@ -24,8 +25,8 @@ from tkinter import filedialog, messagebox, ttk
 
 import webfire_core as core
 
-DOWNLOAD_DIR = Path(__file__).parent / "downloads"
-DOWNLOAD_DIR.mkdir(exist_ok=True)
+_CONFIG_PATH    = Path(__file__).parent / "config.json"
+_DEFAULT_DL_DIR = Path(__file__).parent / "downloads"
 
 VERSION = "1.0"
 
@@ -79,8 +80,41 @@ class App(tk.Tk):
         self._dl_card       = None
         self._scan_card     = None
 
+        self._active_folder: Path = self._load_active_folder()
+        self._active_folder.mkdir(parents=True, exist_ok=True)
+        self._folder_var: tk.StringVar | None = None  # assigned in _build_folder_bar
+
         self._build_ui()
         self._refresh_scan_button_state()  # H16: correct initial state
+
+    # ── Working Folder persistence ─────────────────────────────────────────
+
+    def _load_active_folder(self) -> Path:
+        try:
+            data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+            p = Path(data.get("active_folder", ""))
+            if p and p.is_absolute():
+                return p
+        except Exception:
+            pass
+        return _DEFAULT_DL_DIR
+
+    def _save_active_folder(self):
+        try:
+            _CONFIG_PATH.write_text(
+                json.dumps({"active_folder": str(self._active_folder)}, indent=2),
+                encoding="utf-8")
+        except Exception:
+            pass  # graceful degradation — folder still works this session
+
+    def _set_active_folder(self, path: Path):
+        """Single choke-point for all folder changes."""
+        self._active_folder = path
+        self._active_folder.mkdir(parents=True, exist_ok=True)
+        self._save_active_folder()
+        if self._folder_var:
+            self._folder_var.set(str(self._active_folder))
+        self._refresh_scan_button_state()
 
     # ── UI construction ────────────────────────────────────────────────────
 
@@ -115,6 +149,57 @@ class App(tk.Tk):
         style.configure("TProgressbar",
                          troughcolor="#e2e8f0", background="#16a34a")
 
+        # ── Button styles — tk.Button ignores bg/fg on macOS Aqua; ttk+clam works
+        style.configure("Blue.TButton",
+                        background=C_BTN_BLUE, foreground="white",
+                        font=("Helvetica", 10, "bold"), relief="flat",
+                        borderwidth=0, padding=(6, 5))
+        style.map("Blue.TButton",
+                  background=[("active", "#1d4ed8"), ("disabled", "#93c5fd")],
+                  foreground=[("active", "white"), ("disabled", "#dbeafe")])
+        style.configure("Green.TButton",
+                        background=C_BTN_GRN, foreground="white",
+                        font=("Helvetica", 9, "bold"), relief="flat",
+                        borderwidth=0, padding=(6, 3))
+        style.map("Green.TButton",
+                  background=[("active", "#15803d"), ("disabled", "#86efac")],
+                  foreground=[("active", "white"), ("disabled", "#dcfce7")])
+        style.configure("Amber.TButton",
+                        background=C_BTN_AMB, foreground="white",
+                        font=("Helvetica", 10, "bold"), relief="flat",
+                        borderwidth=0, padding=(6, 4))
+        style.map("Amber.TButton",
+                  background=[("active", "#b45309")],
+                  foreground=[("active", "white")])
+        style.configure("DarkGrey.TButton",
+                        background="#4b5563", foreground="white",
+                        font=("Helvetica", 9, "bold"), relief="flat",
+                        borderwidth=0, padding=(6, 4))
+        style.map("DarkGrey.TButton",
+                  background=[("active", "#374151"), ("disabled", "#9ca3af")],
+                  foreground=[("active", "white"), ("disabled", "#f3f4f6")])
+        style.configure("Red.TButton",
+                        background="#dc2626", foreground="white",
+                        font=("Helvetica", 9, "bold"), relief="flat",
+                        borderwidth=0, padding=(6, 2))
+        style.map("Red.TButton",
+                  background=[("active", "#b91c1c")],
+                  foreground=[("active", "white")])
+        style.configure("Header.TButton",
+                        background="#2d6a9f", foreground="white",
+                        font=("Helvetica", 11, "bold"), relief="flat",
+                        borderwidth=0, padding=(8, 2))
+        style.map("Header.TButton",
+                  background=[("active", "#1d4ed8")],
+                  foreground=[("active", "white")])
+        style.configure("Grey.TButton",
+                        background="#e5e7eb", foreground="#374151",
+                        font=("Helvetica", 9), relief="flat",
+                        borderwidth=0, padding=(6, 4))
+        style.map("Grey.TButton",
+                  background=[("active", "#d1d5db"), ("disabled", "#e5e7eb")],
+                  foreground=[("active", "#374151"), ("disabled", "#6b7280")])
+
         # ── Title bar
         hdr = tk.Frame(self, bg=C_HEADER, height=52)
         hdr.pack(fill="x")
@@ -126,10 +211,12 @@ class App(tk.Tk):
                  bg=C_HEADER, fg="#93b8d8",
                  font=("Helvetica", 10)).pack(side="left", padx=4, pady=10)
         # M27 — Help/About button
-        tk.Button(hdr, text=" ? ", bg="#2d6a9f", fg="white",
-                  activebackground="#1d4ed8", font=("Helvetica", 11, "bold"),
-                  relief="flat", cursor="hand2", padx=8, pady=2,
-                  command=self._show_help).pack(side="right", padx=12, pady=10)
+        ttk.Button(hdr, text=" ? ", style="Header.TButton",
+                   cursor="hand2",
+                   command=self._show_help).pack(side="right", padx=12, pady=10)
+
+        # ── Working Folder bar
+        self._build_folder_bar()
 
         # ── Scrollable main canvas
         outer = tk.Frame(self, bg="#f0f2f5")
@@ -170,6 +257,32 @@ class App(tk.Tk):
         self.bind_all("<Command-a>",   self._kb_select_all)
         self.bind_all("<Command-s>",   self._kb_export)
         self.bind_all("<Escape>",      self._kb_cancel)
+
+    def _build_folder_bar(self):
+        self._folder_var = tk.StringVar(value=str(self._active_folder))
+
+        bar = tk.Frame(self, bg="#e8edf3", pady=5, padx=14)
+        bar.pack(fill="x")  # packs between header and scrollable canvas
+
+        tk.Label(bar, text="Working Folder:",
+                 bg="#e8edf3", fg="#374151",
+                 font=("Helvetica", 9, "bold")).pack(side="left")
+
+        tk.Label(bar, textvariable=self._folder_var,
+                 bg="#e8edf3", fg="#1e3a5c",
+                 font=("Helvetica", 9), anchor="w").pack(
+                     side="left", padx=(6, 0), fill="x", expand=True)
+
+        ttk.Button(bar, text="  Change Folder\u2026  ",
+                   style="Grey.TButton", cursor="hand2",
+                   command=self._pick_working_folder).pack(side="right")
+
+    def _pick_working_folder(self):
+        chosen = filedialog.askdirectory(
+            title="Select Working Folder \u2014 downloads will go here; scans will read from here",
+            initialdir=str(self._active_folder))
+        if chosen:
+            self._set_active_folder(Path(chosen))
 
     def _card(self, parent, step, title, hidden=False):
         outer = tk.Frame(parent, bg="#f0f2f5")
@@ -267,15 +380,14 @@ class App(tk.Tk):
         # Button row — M3: add Clear button, M4: add search spinner
         btn_row = tk.Frame(body, bg="white")
         btn_row.pack(fill="x", pady=(4, 0))
-        self._btn_search = tk.Button(
+        self._btn_search = ttk.Button(
             btn_row, text="  Search WebFIRE  ",
-            bg=C_BTN_BLUE, fg="white", activebackground="#1d4ed8",
-            font=("Helvetica", 10, "bold"), relief="flat", cursor="hand2",
-            padx=6, pady=5, command=self._do_search)
+            style="Blue.TButton", cursor="hand2",
+            command=self._do_search)
         self._btn_search.pack(side="left")
-        tk.Button(btn_row, text="Clear", bg="#e5e7eb", fg="#374151",
-                  relief="flat", font=("Helvetica", 9), cursor="hand2",
-                  padx=6, pady=5, command=self._reset_search).pack(side="left", padx=8)
+        ttk.Button(btn_row, text="Clear", style="Grey.TButton",
+                   cursor="hand2",
+                   command=self._reset_search).pack(side="left", padx=8)
         # M4 — indeterminate spinner shown during search
         self._search_spinner = ttk.Progressbar(btn_row, mode="indeterminate",
                                                length=120)
@@ -315,17 +427,16 @@ class App(tk.Tk):
         tk.Label(tb, text="  \u2588 = previously downloaded",
                  bg="#f8fafc", fg="#16a34a",
                  font=("Helvetica", 8)).pack(side="left", padx=(8, 0))
-        tk.Button(tb, text="Select All", bg="#e5e7eb", relief="flat",
-                  font=("Helvetica", 9), cursor="hand2", padx=6,
-                  command=self._select_all).pack(side="left", padx=(12, 4))
-        tk.Button(tb, text="Clear", bg="#e5e7eb", relief="flat",
-                  font=("Helvetica", 9), cursor="hand2", padx=6,
-                  command=self._select_none).pack(side="left", padx=4)
-        self._btn_download = tk.Button(
+        ttk.Button(tb, text="Select All", style="Grey.TButton",
+                   cursor="hand2",
+                   command=self._select_all).pack(side="left", padx=(12, 4))
+        ttk.Button(tb, text="Clear", style="Grey.TButton",
+                   cursor="hand2",
+                   command=self._select_none).pack(side="left", padx=4)
+        self._btn_download = ttk.Button(
             tb, text="  \u2193  Download Selected  ",
-            bg=C_BTN_GRN, fg="white", activebackground="#15803d",
-            font=("Helvetica", 9, "bold"), relief="flat", cursor="hand2",
-            padx=6, pady=3, command=self._do_download)
+            style="Green.TButton", cursor="hand2",
+            command=self._do_download)
         self._btn_download.pack(side="right", padx=6)
 
         # Treeview
@@ -381,11 +492,10 @@ class App(tk.Tk):
         self._dl_lbl = tk.Label(prog_row, text="", bg="white",
                                 fg="#111111", font=("Helvetica", 9), width=10)
         self._dl_lbl.pack(side="left", padx=8)
-        self._btn_cancel_dl = tk.Button(
+        self._btn_cancel_dl = ttk.Button(
             prog_row, text="Cancel",
-            bg="#dc2626", fg="white", activebackground="#b91c1c",
-            font=("Helvetica", 9, "bold"), relief="flat", cursor="hand2",
-            padx=6, pady=2, command=self._cancel_download)
+            style="Red.TButton", cursor="hand2",
+            command=self._cancel_download)
         # Hidden until a download is in progress
         self._dl_cancel = False
 
@@ -425,46 +535,27 @@ class App(tk.Tk):
         # ── Toolbar ─────────────────────────────────────────────────────────
         tb = tk.Frame(body, bg="#f8fafc", pady=6, padx=10)
         tb.pack(fill="x")
-        # H16 — scan button starts disabled; enabled when ZIPs exist
-        # H16 — start disabled; use state="normal"+no-op to avoid macOS Aqua
-        #        overriding text color when state="disabled"
-        self._btn_scan = tk.Button(
+        # H16 — scan button starts as no-op (cursor=arrow); enabled when ZIPs exist
+        self._btn_scan = ttk.Button(
             tb, text="  \U0001f50d  Scan for Deviations  ",
-            bg=C_BTN_AMB, fg="white", activebackground=C_BTN_AMB,
-            font=("Helvetica", 10, "bold"), relief="flat", cursor="arrow",
-            padx=6, pady=4, command=lambda: None)
+            style="Amber.TButton", cursor="arrow",
+            command=lambda: None)
         self._btn_scan.pack(side="left")
-        self._btn_scan_folder = tk.Button(
-            tb, text="  \U0001f4c2  Scan Local Folder\u2026  ",
-            bg="#4b5563", fg="white", activebackground="#374151",
-            font=("Helvetica", 9, "bold"), relief="flat", cursor="hand2",
-            padx=6, pady=4, command=self._do_scan_folder)
-        self._btn_scan_folder.pack(side="left", padx=4)
-        # M21 — explicit disabled fg for export buttons
-        self._btn_export = tk.Button(
+        self._btn_export = ttk.Button(
             tb, text="  Export CSV  ",
-            bg="#e5e7eb", fg="#6b7280", relief="flat",
-            disabledforeground="#6b7280",
-            font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
+            style="Grey.TButton", cursor="hand2",
             command=self._do_export, state="disabled")
         self._btn_export.pack(side="left", padx=4)
-        self._btn_export_xlsx = tk.Button(
+        self._btn_export_xlsx = ttk.Button(
             tb, text="  Export XLSX  ",
-            bg="#e5e7eb", fg="#6b7280", relief="flat",
-            disabledforeground="#6b7280",
-            font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
+            style="Grey.TButton", cursor="hand2",
             command=self._do_export_xlsx, state="disabled")
         self._btn_export_xlsx.pack(side="left", padx=4)
-        self._btn_extract = tk.Button(
+        self._btn_extract = ttk.Button(
             tb, text="  Extract Files\u2026  ",
-            bg="#e5e7eb", fg="#6b7280", relief="flat",
-            disabledforeground="#6b7280",
-            font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
+            style="Grey.TButton", cursor="hand2",
             command=self._do_extract_files, state="disabled")
         self._btn_extract.pack(side="left", padx=4)
-        self._scan_count_lbl = tk.Label(tb, text="", bg="#f8fafc",
-                                        fg="#111111", font=("Helvetica", 9))
-        self._scan_count_lbl.pack(side="left", padx=12)
 
         # ── Filter bar ───────────────────────────────────────────────────────
         fb = tk.Frame(body, bg="#eef1f5", pady=5, padx=10)
@@ -487,9 +578,9 @@ class App(tk.Tk):
                                   values=["All", "Deviations", "Manual Review", "Pass", "Errors"])
         result_cb.pack(side="left", padx=4)
         result_cb.bind("<<ComboboxSelected>>", lambda _: self._apply_scan_filter())
-        tk.Button(fb, text="Clear", bg="#e5e7eb", fg="#374151", relief="flat",
-                  font=("Helvetica", 9), cursor="hand2", padx=6,
-                  command=self._clear_filter).pack(side="left", padx=8)
+        ttk.Button(fb, text="Clear", style="Grey.TButton",
+                   cursor="hand2",
+                   command=self._clear_filter).pack(side="left", padx=8)
 
         # L24 — fallback warning as full-width strip below filter bar;
         # always packed — collapses to 0 height when label text is empty
@@ -521,11 +612,14 @@ class App(tk.Tk):
         self._scan_summary.pack_forget()
 
         # ── Results treeview ─────────────────────────────────────────────────
+        self._tree_frame = tk.Frame(body, bg="white")
+        self._tree_frame.pack(fill="both", expand=True)
+
         scols = ("result", "facility", "st", "date", "type",
                  "location", "pollutant", "measured", "limit",
                  "pct", "notes")
         self._scan_tree = ttk.Treeview(
-            body, columns=scols, show="tree headings", height=14)
+            self._tree_frame, columns=scols, show="tree headings", height=14)
 
         self._scan_tree.heading("#0", text="")
         self._scan_tree.column("#0", width=20, stretch=False, minwidth=20)
@@ -559,21 +653,15 @@ class App(tk.Tk):
                                       foreground="#92400e")
         self._scan_tree.tag_configure("fallback",    foreground="#b45309")
 
-        scan_hsb = ttk.Scrollbar(body, orient="horizontal",
+        scan_hsb = ttk.Scrollbar(self._tree_frame, orient="horizontal",
                                   command=self._scan_tree.xview)
-        scan_vsb = ttk.Scrollbar(body, orient="vertical",
+        scan_vsb = ttk.Scrollbar(self._tree_frame, orient="vertical",
                                   command=self._scan_tree.yview)
         self._scan_tree.configure(yscrollcommand=scan_vsb.set,
                                   xscrollcommand=scan_hsb.set)
         scan_hsb.pack(side="bottom", fill="x")
         self._scan_tree.pack(side="left", fill="both", expand=True)
         scan_vsb.pack(side="right", fill="y")
-
-        self._scan_placeholder = tk.Label(
-            body,
-            text="Click  Scan for Deviations  to analyze all downloaded reports.",
-            bg="white", fg="#9ca3af", font=("Helvetica", 10), pady=16)
-        self._scan_placeholder.pack()
 
         # M18 — double-click opens the report document
         self._scan_tree.bind("<Double-1>", self._open_scan_result_folder)
@@ -661,13 +749,11 @@ class App(tk.Tk):
 
     # H16 — enable/disable scan button based on whether ZIPs exist
     def _refresh_scan_button_state(self):
-        has_zips = any(DOWNLOAD_DIR.glob("*.zip"))
+        has_zips = any(self._active_folder.glob("*.zip"))
         if has_zips:
-            self._btn_scan.configure(command=self._do_scan,
-                                     cursor="hand2", activebackground="#b45309")
+            self._btn_scan.configure(command=self._do_scan, cursor="hand2")
         else:
-            self._btn_scan.configure(command=lambda: None,
-                                     cursor="arrow", activebackground=C_BTN_AMB)
+            self._btn_scan.configure(command=lambda: None, cursor="arrow")
 
     # ── Sort helpers ───────────────────────────────────────────────────────
 
@@ -778,7 +864,7 @@ class App(tk.Tk):
         # Populate tree
         self._res_tree.delete(*self._res_tree.get_children())
         for r in reports:
-            cached = (DOWNLOAD_DIR / f"{r['id']}.zip").exists()
+            cached = (self._active_folder / f"{r['id']}.zip").exists()
             r["downloaded"] = cached
             self._insert_result_row(r, checked=cached, cached=cached)
             self._selected[r["id"]] = cached  # pre-select cached rows
@@ -860,6 +946,9 @@ class App(tk.Tk):
         if not targets:
             return
 
+        dl_dir = self._active_folder
+        dl_dir.mkdir(parents=True, exist_ok=True)
+
         self._dl_cancel = False
         self._btn_download.configure(state="disabled")
         self._btn_cancel_dl.pack(side="left", padx=(0, 4))
@@ -883,7 +972,7 @@ class App(tk.Tk):
                            self._dl_file_lbl.configure(
                                text=f"Downloading: {r['id']}  —  {r['facility'][:60]}"))
                 ok, path, msg = core.download_report(
-                    session, rpt["id"], DOWNLOAD_DIR)
+                    session, rpt["id"], dl_dir)
                 label = "cached" if msg == "already cached" \
                     else ("ok" if ok else f"error: {msg}")
                 icon  = "\u2713" if (ok and msg != "already cached") \
@@ -891,6 +980,18 @@ class App(tk.Tk):
                 self.after(0, lambda r=rpt, lbl=label, ic=icon:
                            self._on_dl_progress(r, lbl, ic))
                 if ok and msg != "already cached":
+                    sidecar = dl_dir / f"{rpt['id']}.json"
+                    sidecar.write_text(json.dumps({
+                        "facility":       rpt.get("facility", ""),
+                        "city":           rpt.get("city", ""),
+                        "state":          rpt.get("state", ""),
+                        "date":           str(rpt.get("date", "")),
+                        "report_type":    rpt.get("report_type", ""),
+                        "organization":   rpt.get("organization", ""),
+                        "county":         rpt.get("county", ""),
+                        "report_subtype": rpt.get("report_subtype", ""),
+                        "pollutants":     rpt.get("pollutants", ""),
+                    }), encoding="utf-8")
                     time.sleep(0.8)
             self.after(0, self._on_dl_done)
 
@@ -942,37 +1043,60 @@ class App(tk.Tk):
 
     # ── Scan ───────────────────────────────────────────────────────────────
 
+    def _meta_for_zip(self, z: Path) -> dict:
+        """Return metadata for a ZIP, preferring the sidecar JSON written at download time."""
+        sidecar = z.with_suffix(".json")
+        if sidecar.exists():
+            try:
+                saved = json.loads(sidecar.read_text(encoding="utf-8"))
+                return {
+                    "id":             z.stem,
+                    "facility":       saved.get("facility", "") or z.stem,
+                    "city":           saved.get("city", ""),
+                    "state":          saved.get("state", ""),
+                    "date":           saved.get("date", ""),
+                    "report_type":    saved.get("report_type", "") or core.classify_report(z),
+                    "organization":   saved.get("organization", ""),
+                    "county":         saved.get("county", ""),
+                    "report_subtype": saved.get("report_subtype", ""),
+                    "pollutants":     saved.get("pollutants", ""),
+                    "downloaded":     True,
+                    "scanned":        False,
+                    "_zip_path":      str(z),
+                }
+            except Exception:
+                pass
+        rtype     = core.classify_report(z)
+        file_meta = core.extract_file_meta(z)
+        return {
+            "id":             z.stem,
+            "facility":       file_meta["facility"] or z.stem,
+            "city":           file_meta["city"],
+            "state":          file_meta["state"],
+            "date":           "",
+            "report_type":    rtype,
+            "organization":   "",
+            "county":         "",
+            "report_subtype": "",
+            "pollutants":     "",
+            "downloaded":     True,
+            "scanned":        False,
+            "_zip_path":      str(z),
+        }
+
     def _do_scan(self):
         if self._scan_rows:
             if not messagebox.askyesno("Rescan?",
                     f"This will replace {len(self._scan_rows)} existing findings.\nContinue?"):
                 return
 
-        zips_in_dir = sorted(DOWNLOAD_DIR.glob("*.zip"))
+        scan_dir = self._active_folder
+        zips_in_dir = sorted(scan_dir.glob("*.zip"))
         targets = []
         known = {r["id"]: r for r in self._reports}
         for z in zips_in_dir:
             rid = z.stem
-            if rid in known:
-                targets.append(known[rid])
-            else:
-                rtype     = core.classify_report(z)
-                file_meta = core.extract_file_meta(z)
-                targets.append({
-                    "id":             rid,
-                    "facility":       file_meta["facility"] or rid,
-                    "city":           file_meta["city"],
-                    "state":          file_meta["state"],
-                    "date":           "",
-                    "report_type":    rtype,
-                    "organization":   "",
-                    "county":         "",
-                    "report_subtype": "",
-                    "pollutants":     "",
-                    "downloaded":     True,
-                    "scanned":        False,
-                    "_zip_path":      str(z),
-                })
+            targets.append(known[rid] if rid in known else self._meta_for_zip(z))
 
         if not targets:
             messagebox.showinfo("Nothing to scan",
@@ -980,68 +1104,14 @@ class App(tk.Tk):
             return
 
         self._disable_scan_buttons()
-        self._scan_zip_dir = DOWNLOAD_DIR
+        self._scan_zip_dir = scan_dir
         self._start_scan_ui(len(targets))
         self._set_status("Scanning reports…")
 
         def worker():
             for rpt in targets:
-                path = DOWNLOAD_DIR / f"{rpt['id']}.zip"
+                path = scan_dir / f"{rpt['id']}.zip"
                 rows = core.scan_report(path, rpt)
-                self.after(0, lambda r=rows, total=len(targets):
-                           self._on_scan_progress(r, total))
-            self.after(0, self._on_scan_done)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _do_scan_folder(self):
-        folder = filedialog.askdirectory(
-            title="Select folder containing downloaded report ZIPs",
-            initialdir=str(DOWNLOAD_DIR))
-        if not folder:
-            return
-
-        zips = sorted(Path(folder).glob("*.zip"))
-        if not zips:
-            messagebox.showinfo("No ZIPs found",
-                                f"No .zip files found in:\n{folder}")
-            return
-
-        known = {r["id"]: r for r in self._reports}
-
-        targets = []
-        for z in zips:
-            rid = z.stem
-            if rid in known:
-                meta = known[rid]
-            else:
-                rtype     = core.classify_report(z)
-                file_meta = core.extract_file_meta(z)
-                meta = {
-                    "id":             rid,
-                    "facility":       file_meta["facility"] or rid,
-                    "city":           file_meta["city"],
-                    "state":          file_meta["state"],
-                    "date":           "",
-                    "report_type":    rtype,
-                    "organization":   "",
-                    "county":         "",
-                    "report_subtype": "",
-                    "pollutants":     "",
-                    "downloaded":     True,
-                    "scanned":        False,
-                    "_zip_path":      str(z),
-                }
-            targets.append((z, meta))
-
-        self._disable_scan_buttons()
-        self._scan_zip_dir = Path(folder)
-        self._start_scan_ui(len(targets))
-        self._set_status(f"Scanning {len(targets)} ZIPs from {Path(folder).name}/…")
-
-        def worker():
-            for z, rpt in targets:
-                rows = core.scan_report(z, rpt)
                 self.after(0, lambda r=rows, total=len(targets):
                            self._on_scan_progress(r, total))
             self.after(0, self._on_scan_done)
@@ -1060,13 +1130,6 @@ class App(tk.Tk):
         flagged     = sum(1 for r in self._scan_rows if r.get("deviation") == "YES")
         need_review = sum(1 for r in self._scan_rows if r.get("deviation") == "manual-review")
         n           = len(self._scan_rows)
-        n_reports     = len({r["report_id"] for r in self._scan_rows})
-        n_dev_reports = len({r["report_id"] for r in self._scan_rows if r.get("deviation") == "YES"})
-        review_str  = f"  ·  {need_review} need review" if need_review else ""
-        self._scan_count_lbl.configure(
-            text=f"{n} finding{'s' if n != 1 else ''} from {n_reports} report{'s' if n_reports != 1 else ''}"
-                 + (f"  ·  {n_dev_reports} report{'s' if n_dev_reports != 1 else ''} with deviations" if n_dev_reports else "")
-                 + review_str)
 
     def _insert_report_group(self, rows: list, parent_iid: str = ""):
         if not rows:
@@ -1172,12 +1235,12 @@ class App(tk.Tk):
         report_id = parent if parent else iid
 
         if self._scan_zip_dir is None:
-            self._open_path(DOWNLOAD_DIR)
+            self._open_path(self._active_folder)
             return
 
         zip_path = self._scan_zip_dir / f"{report_id}.zip"
         if not zip_path.exists():
-            self._open_path(DOWNLOAD_DIR)
+            self._open_path(self._active_folder)
             return
 
         # Extract to a per-report temp directory and open the main document
@@ -1200,7 +1263,7 @@ class App(tk.Tk):
             self._open_path(tmp)
             self.after(10_000, lambda t=tmp: shutil.rmtree(t, ignore_errors=True))
         except Exception:
-            self._open_path(DOWNLOAD_DIR)
+            self._open_path(self._active_folder)
 
     # ── Scan filter / sort ─────────────────────────────────────────────────
 
@@ -1303,36 +1366,24 @@ class App(tk.Tk):
         need_review = sum(1 for r in self._scan_rows if r.get("deviation") == "manual-review")
         n           = len(self._scan_rows)
 
+        no_issues = n - flagged - need_review
+        msg = (f"Potential Deviations: {flagged}"
+               f"  |  Manual Review: {need_review}"
+               f"  |  No Issues Identified: {no_issues}")
         if flagged:
-            review_note = (f"  |  {need_review} require manual review"  # M17
-                           if need_review else "")
-            dev_facilities = list(dict.fromkeys(
-                r["facility"] for r in self._scan_rows if r.get("deviation") == "YES"))
-            fac_str = ", ".join(dev_facilities[:4])
-            if len(dev_facilities) > 4:
-                fac_str += f" + {len(dev_facilities) - 4} more"
-            msg   = (f"\u26a0  {flagged} potential deviation"
-                     f"{'s' if flagged != 1 else ''} flagged — "
-                     f"{fac_str}{review_note}")
             color = C_DEV_FG
         elif need_review:
-            msg   = (f"\u26a0  {need_review} report"
-                     f"{'s' if need_review != 1 else ''} require manual review")  # M17
             color = "#92400e"
         else:
-            msg   = (f"\u2705  No deviations detected across {n} finding"
-                     f"{'s' if n != 1 else ''} from all downloaded reports")
             color = "#15803d"
 
         self._scan_summary.configure(text=msg, fg=color)
-        self._scan_summary.pack(fill="x")
-        self._btn_scan.configure(command=self._do_scan,
-                                 cursor="hand2", activebackground="#b45309")
-        self._btn_scan_folder.configure(state="normal")
+        self._scan_summary.pack(fill="x", before=self._tree_frame)
+        self._btn_scan.configure(command=self._do_scan, cursor="hand2")
         if self._scan_rows:
-            self._btn_export.configure(state="normal",      fg="#374151")
-            self._btn_export_xlsx.configure(state="normal", fg="#374151")
-            self._btn_extract.configure(state="normal",     fg="#374151")
+            self._btn_export.configure(state="normal")
+            self._btn_export_xlsx.configure(state="normal")
+            self._btn_extract.configure(state="normal")
 
         # M26 — update window title with summary
         self.title(
@@ -1340,8 +1391,6 @@ class App(tk.Tk):
             + (f"  |  {flagged} deviation{'s' if flagged != 1 else ''}" if flagged else ""))
 
         self._set_status(f"Scan complete — {n} findings, {flagged} flagged")
-        if flagged:
-            self._filter_result_var.set("Deviations")
         self._apply_scan_filter()
         self._scan_tree.focus_set()
 
@@ -1610,9 +1659,8 @@ class App(tk.Tk):
             cancel_event.set()
             dialog.destroy()
 
-        tk.Button(dialog, text="Cancel", bg="#e5e7eb", fg="#374151",
-                  font=("Helvetica", 9), relief="flat", padx=10, pady=3,
-                  cursor="hand2", command=_on_cancel).pack(pady=10)
+        ttk.Button(dialog, text="Cancel", style="Grey.TButton",
+                   cursor="hand2", command=_on_cancel).pack(pady=10)
 
         errors = []
         extracted_counts = {"Deviations": 0, "Manual Review": 0, "No Deviations": 0}
@@ -1664,7 +1712,16 @@ class App(tk.Tk):
                             out_path.write_bytes(zf.read(member))
                     extracted_counts[subfolder] += 1
                 except zipfile.BadZipFile:
-                    errors.append(f"{rid}: corrupt or invalid ZIP")
+                    # WebFIRE returned a bare PDF saved under the .zip name.
+                    # Copy it directly to the target folder as a .pdf file.
+                    with open(zip_path, "rb") as f:
+                        raw = f.read(4)
+                    if raw == b"%PDF":
+                        out_path = target_dir / f"{rid}.pdf"
+                        out_path.write_bytes(zip_path.read_bytes())
+                        extracted_counts[subfolder] += 1
+                    else:
+                        errors.append(f"{rid}: corrupt or invalid ZIP")
                 except Exception as exc:
                     errors.append(f"{rid}: {exc}")
                 self.after(0, lambda i=i: _update_progress(i + 1))
@@ -1695,19 +1752,16 @@ class App(tk.Tk):
         self._search_spinner.pack_forget()
 
     def _disable_scan_buttons(self):
-        self._btn_scan.configure(command=lambda: None,
-                                 cursor="arrow", activebackground=C_BTN_AMB)
-        self._btn_scan_folder.configure(state="disabled")
+        self._btn_scan.configure(command=lambda: None, cursor="arrow")
         for btn in (self._btn_export, self._btn_export_xlsx, self._btn_extract):
-            btn.configure(state="disabled", fg="#6b7280")
+            btn.configure(state="disabled")
 
     def _start_scan_ui(self, n_targets: int):
         """Reset and show scan progress UI; caller sets _scan_zip_dir and status."""
         self._scan_rows = []
         self._scan_tree.delete(*self._scan_tree.get_children())
         self._scan_summary.pack_forget()
-        self._scan_placeholder.pack_forget()
-        self._scan_prog_frame.pack(fill="x")
+        self._scan_prog_frame.pack(fill="x", before=self._tree_frame)
         self._scan_bar["maximum"] = n_targets
         self._scan_bar["value"]   = 0
         self._scan_lbl.configure(text=f"0 / {n_targets}")
@@ -1757,17 +1811,16 @@ class App(tk.Tk):
             "  2. Select and download the reports you want to review.\n"
             "  3. Click Scan for Deviations to analyze all downloaded files.\n"
             "  4. Export results to CSV or XLSX for further analysis.\n\n"
-            "Tip: Use Scan Local Folder to analyze ZIPs from a prior session\n"
-            "without repeating the search step."
+            "Tip: Use Change Folder to point the app at any folder of ZIPs,\n"
+            "then Scan for Deviations \u2014 no re-search needed."
         )
         tk.Label(win, text=body_text, bg="white", fg="#374151",
                  font=("Helvetica", 10), justify="left", anchor="w",
                  padx=24).pack(fill="x")
 
-        tk.Button(win, text="Close", bg=C_BTN_BLUE, fg="white",
-                  font=("Helvetica", 10, "bold"), relief="flat",
-                  padx=16, pady=4, cursor="hand2",
-                  command=win.destroy).pack(pady=(16, 0))
+        ttk.Button(win, text="Close", style="Blue.TButton",
+                   cursor="hand2",
+                   command=win.destroy).pack(pady=(16, 0))
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
