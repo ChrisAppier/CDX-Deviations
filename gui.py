@@ -73,6 +73,12 @@ class App(tk.Tk):
         self._filter_var        = None
         self._filter_result_var = None
 
+        # Section outer frames (set during _build_ui; used for ordering)
+        self._search_card   = None
+        self._results_card  = None
+        self._dl_card       = None
+        self._scan_card     = None
+
         self._build_ui()
         self._refresh_scan_button_state()  # H16: correct initial state
 
@@ -165,26 +171,40 @@ class App(tk.Tk):
         self.bind_all("<Command-s>",   self._kb_export)
         self.bind_all("<Escape>",      self._kb_cancel)
 
-    def _section_header(self, parent, step, title):
-        f = tk.Frame(parent, bg=C_HEADER)
-        f.pack(fill="x")
-        badge = tk.Label(f, text=str(step), bg="#2d6a9f", fg="white",
-                         font=("Helvetica", 10, "bold"),
-                         width=2, relief="flat")
-        badge.pack(side="left", padx=(8, 6), pady=6)
-        tk.Label(f, text=title, bg=C_HEADER, fg="white",
-                 font=("Helvetica", 10, "bold")).pack(side="left", pady=6)
-        return f
-
     def _card(self, parent, step, title, hidden=False):
         outer = tk.Frame(parent, bg="#f0f2f5")
         outer.pack(fill="x", pady=(0, 12))
-        self._section_header(outer, step, title)
-        body = tk.Frame(outer, bg="white",
-                        relief="flat", bd=0,
-                        highlightbackground="#dde1e7",
-                        highlightthickness=1)
+
+        # ── Clickable header ──
+        hdr = tk.Frame(outer, bg=C_HEADER, cursor="hand2")
+        hdr.pack(fill="x")
+        badge = tk.Label(hdr, text=str(step), bg="#2d6a9f", fg="white",
+                         font=("Helvetica", 10, "bold"),
+                         width=2, relief="flat", cursor="hand2")
+        badge.pack(side="left", padx=(8, 6), pady=6)
+        title_lbl = tk.Label(hdr, text=title, bg=C_HEADER, fg="white",
+                             font=("Helvetica", 10, "bold"), cursor="hand2")
+        title_lbl.pack(side="left", pady=6)
+        arrow_lbl = tk.Label(hdr, text=" ▼ ", bg=C_HEADER, fg="white",
+                              font=("Helvetica", 10), cursor="hand2")
+        arrow_lbl.pack(side="right", padx=6, pady=6)
+
+        # ── Body ──
+        body = tk.Frame(outer, bg="white", relief="flat", bd=0,
+                        highlightbackground="#dde1e7", highlightthickness=1)
         body.pack(fill="x")
+
+        def _toggle(_event=None):
+            if body.winfo_ismapped():
+                body.pack_forget()
+                arrow_lbl.configure(text=" ▶ ")
+            else:
+                body.pack(fill="x")
+                arrow_lbl.configure(text=" ▼ ")
+
+        for w in (hdr, badge, title_lbl, arrow_lbl):
+            w.bind("<Button-1>", _toggle)
+
         if hidden:
             outer.pack_forget()
         return outer, body
@@ -192,7 +212,7 @@ class App(tk.Tk):
     # ── Step 1: Search ─────────────────────────────────────────────────────
 
     def _build_search_section(self):
-        _, body = self._card(self._main, 1, "SEARCH PARAMETERS")
+        self._search_card, body = self._card(self._main, 1, "SEARCH PARAMETERS")
         body.configure(padx=14, pady=12)
 
         # Row 0
@@ -282,7 +302,7 @@ class App(tk.Tk):
 
     def _build_results_section(self):
         self._results_card, body = self._card(
-            self._main, 2, "SEARCH RESULTS", hidden=True)
+            self._main, 2, "SEARCH RESULTS")
         body.configure(padx=0, pady=0)
 
         # Toolbar
@@ -351,7 +371,7 @@ class App(tk.Tk):
 
     def _build_download_section(self):
         self._dl_card, body = self._card(
-            self._main, 3, "DOWNLOAD PROGRESS", hidden=True)
+            self._main, 3, "DOWNLOAD PROGRESS")
         body.configure(padx=14, pady=10)
 
         prog_row = tk.Frame(body, bg="white")
@@ -607,7 +627,37 @@ class App(tk.Tk):
         self._status_var.set(msg)
 
     def _show_card(self, card_outer):
-        card_outer.pack(fill="x", pady=(0, 12))
+        """Show a card section, inserting it in the correct 1→2→3→4 order."""
+        sections = [self._search_card, self._results_card,
+                    self._dl_card, self._scan_card]
+        idx = sections.index(card_outer)
+
+        # Find the nearest preceding section that is currently pack-managed
+        after_widget = None
+        for i in range(idx - 1, -1, -1):
+            try:
+                sections[i].pack_info()
+                after_widget = sections[i]
+                break
+            except tk.TclError:
+                pass
+
+        if after_widget is not None:
+            card_outer.pack(after=after_widget, fill="x", pady=(0, 12))
+        else:
+            # Fall back to packing before the nearest following visible section
+            before_widget = None
+            for i in range(idx + 1, len(sections)):
+                try:
+                    sections[i].pack_info()
+                    before_widget = sections[i]
+                    break
+                except tk.TclError:
+                    pass
+            if before_widget is not None:
+                card_outer.pack(before=before_widget, fill="x", pady=(0, 12))
+            else:
+                card_outer.pack(fill="x", pady=(0, 12))
 
     # H16 — enable/disable scan button based on whether ZIPs exist
     def _refresh_scan_button_state(self):
