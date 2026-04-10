@@ -9,6 +9,8 @@ Usage:
 """
 
 import csv
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -20,15 +22,20 @@ import webfire_core as core
 DOWNLOAD_DIR = Path(__file__).parent / "downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
+VERSION = "1.0"
+
 # ── Colours ────────────────────────────────────────────────────────────────
-C_HEADER   = "#1a3a5c"
-C_BTN_BLUE = "#2563eb"
-C_BTN_GRN  = "#16a34a"
-C_BTN_AMB  = "#d97706"
-C_DEV_BG   = "#ffe0e0"
-C_DEV_FG   = "#990000"
-C_ERR_BG   = "#fffbe6"
-C_CACHED_BG= "#f0fff4"
+C_HEADER    = "#1a3a5c"
+C_BTN_BLUE  = "#2563eb"
+C_BTN_GRN   = "#16a34a"
+C_BTN_AMB   = "#d97706"
+C_DEV_BG    = "#ffe0e0"
+C_DEV_FG    = "#990000"
+C_ERR_BG    = "#fffbe6"
+C_CACHED_BG = "#f0fff4"
+
+_SORT_ASC  = " ▲"
+_SORT_DESC = " ▼"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -40,12 +47,28 @@ class App(tk.Tk):
         self.minsize(900, 600)
         self.configure(bg="#f0f2f5")
 
-        self._session  = None
-        self._reports  = []   # list[dict] from last search
-        self._selected = {}   # id -> bool (checkbox state)
+        self._session   = None
+        self._reports   = []   # list[dict] from last search
+        self._selected  = {}   # id -> bool (checkbox state)
         self._scan_rows = []
 
+        # Sort state for scan treeview (column name, ascending)
+        self._sort_col = "date"
+        self._sort_asc = False
+
+        # Sort state for results treeview
+        self._res_sort_col = None
+        self._res_sort_asc = True
+
+        # Download state
+        self._dl_cancel = False
+
+        # Filter vars (initialised properly in _build_scan_section)
+        self._filter_var        = None
+        self._filter_result_var = None
+
         self._build_ui()
+        self._refresh_scan_button_state()  # H16: correct initial state
 
     # ── UI construction ────────────────────────────────────────────────────
 
@@ -90,6 +113,11 @@ class App(tk.Tk):
         tk.Label(hdr, text="EPA CDX / WebFIRE Report Search & Analysis",
                  bg=C_HEADER, fg="#93b8d8",
                  font=("Helvetica", 10)).pack(side="left", padx=4, pady=10)
+        # M27 — Help/About button
+        tk.Button(hdr, text=" ? ", bg="#2d6a9f", fg="white",
+                  activebackground="#1d4ed8", font=("Helvetica", 11, "bold"),
+                  relief="flat", cursor="hand2", padx=8, pady=2,
+                  command=self._show_help).pack(side="right", padx=12, pady=10)
 
         # ── Scrollable main canvas
         outer = tk.Frame(self, bg="#f0f2f5")
@@ -106,7 +134,8 @@ class App(tk.Tk):
 
         self._main.bind("<Configure>", self._on_frame_configure)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
-        self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        # L22 — mousewheel only fires on canvas when cursor is not over a treeview/text
+        self._canvas.bind("<MouseWheel>", self._on_mousewheel)
 
         # ── Steps
         self._build_search_section()
@@ -123,6 +152,12 @@ class App(tk.Tk):
                  bg="#e2e8f0", fg="#475569",
                  font=("Helvetica", 10), anchor="w").pack(
                      side="left", padx=10, pady=3)
+
+        # H25 — Global keyboard shortcuts
+        self.bind_all("<Return>",      self._kb_search)
+        self.bind_all("<Command-a>",   self._kb_select_all)
+        self.bind_all("<Command-s>",   self._kb_export)
+        self.bind_all("<Escape>",      self._kb_cancel)
 
     def _section_header(self, parent, step, title):
         f = tk.Frame(parent, bg=C_HEADER)
@@ -158,16 +193,17 @@ class App(tk.Tk):
         r0 = tk.Frame(body, bg="white")
         r0.pack(fill="x", pady=(0, 8))
 
-        self._fac_var  = self._labeled_entry(r0, "Facility Name", 0, width=22)
-        self._org_var  = self._labeled_entry(r0, "Organization", 1, width=22)
+        self._fac_var = self._labeled_entry(r0, "Facility Name", 0, width=22)
+        self._org_var = self._labeled_entry(r0, "Organization",  1, width=22)
 
-        # State dropdown
+        # State dropdown — H2: show full label, not just code
         tk.Label(r0, text="State", bg="white", fg="#111111",
                  font=("Helvetica", 9, "bold")).grid(row=0, column=4, sticky="w", padx=(12, 4))
-        self._state_var = tk.StringVar(value="AA")
+        state_values = [f"{v}  —  {l}" for v, l in core.STATE_OPTIONS]
+        self._state_var = tk.StringVar(value=state_values[0])
         state_cb = ttk.Combobox(r0, textvariable=self._state_var, width=22,
                                 state="readonly")
-        state_cb["values"] = [f"{v}  —  {l}" for v, l in core.STATE_OPTIONS]
+        state_cb["values"] = state_values
         state_cb.current(0)
         state_cb.grid(row=1, column=4, padx=(12, 4), sticky="w")
 
@@ -177,7 +213,7 @@ class App(tk.Tk):
         r1 = tk.Frame(body, bg="white")
         r1.pack(fill="x", pady=(0, 8))
 
-        self._zip_var   = self._labeled_entry(r1, "ZIP Code",   0, width=12)
+        self._zip_var   = self._labeled_entry(r1, "ZIP Code",               0, width=12)
         self._start_var = self._labeled_entry(r1, "Start Date (MM/DD/YYYY)", 1, width=16)
         self._end_var   = self._labeled_entry(r1, "End Date (MM/DD/YYYY)",   2, width=16)
 
@@ -190,9 +226,19 @@ class App(tk.Tk):
         cfr_cb.current(0)
         cfr_cb.grid(row=1, column=5, padx=(12, 4), sticky="w")
 
-        self._cfrsub_var = self._labeled_entry(r1, "CFR Subpart", 6, width=12)
+        # L5 — CFR Subpart with format hint
+        tk.Label(r1, text="CFR Subpart  (e.g. NNNN)", bg="white", fg="#111111",
+                 font=("Helvetica", 9, "bold")).grid(row=0, column=6, sticky="w", padx=(12, 4))
+        self._cfrsub_var = tk.StringVar()
+        sub_entry = tk.Entry(r1, textvariable=self._cfrsub_var, width=12,
+                             bg="white", fg="#111111", insertbackground="#111111",
+                             relief="solid", bd=1,
+                             highlightthickness=1, highlightcolor="#2563eb",
+                             highlightbackground="#cbd5e1",
+                             font=("Helvetica", 10))
+        sub_entry.grid(row=1, column=6, padx=(12, 4), sticky="w")
 
-        # Button row
+        # Button row — M3: add Clear button, M4: add search spinner
         btn_row = tk.Frame(body, bg="white")
         btn_row.pack(fill="x", pady=(4, 0))
         self._btn_search = tk.Button(
@@ -201,6 +247,12 @@ class App(tk.Tk):
             font=("Helvetica", 10, "bold"), relief="flat", cursor="hand2",
             padx=6, pady=5, command=self._do_search)
         self._btn_search.pack(side="left")
+        tk.Button(btn_row, text="Clear", bg="#e5e7eb", fg="#374151",
+                  relief="flat", font=("Helvetica", 9), cursor="hand2",
+                  padx=6, pady=5, command=self._reset_search).pack(side="left", padx=8)
+        # M4 — indeterminate spinner shown during search
+        self._search_spinner = ttk.Progressbar(btn_row, mode="indeterminate",
+                                               length=120)
         self._search_lbl = tk.Label(btn_row, text="", bg="white",
                                     fg="#374151", font=("Helvetica", 9))
         self._search_lbl.pack(side="left", padx=12)
@@ -208,7 +260,8 @@ class App(tk.Tk):
     def _labeled_entry(self, parent, label, col, width=18):
         tk.Label(parent, text=label, bg="white", fg="#111111",
                  font=("Helvetica", 9, "bold")).grid(
-                     row=0, column=col*2, sticky="w", padx=(0 if col == 0 else 12, 4))
+                     row=0, column=col*2, sticky="w",
+                     padx=(0 if col == 0 else 12, 4))
         var = tk.StringVar()
         e = tk.Entry(parent, textvariable=var, width=width,
                      bg="white", fg="#111111", insertbackground="#111111",
@@ -232,6 +285,10 @@ class App(tk.Tk):
         self._res_count_lbl = tk.Label(tb, text="", bg="#f8fafc",
                                        fg="#111111", font=("Helvetica", 9))
         self._res_count_lbl.pack(side="left")
+        # M8 — cached row legend
+        tk.Label(tb, text="  \u2588 = previously downloaded",
+                 bg="#f8fafc", fg="#16a34a",
+                 font=("Helvetica", 8)).pack(side="left", padx=(8, 0))
         tk.Button(tb, text="Select All", bg="#e5e7eb", relief="flat",
                   font=("Helvetica", 9), cursor="hand2", padx=6,
                   command=self._select_all).pack(side="left", padx=(12, 4))
@@ -254,12 +311,14 @@ class App(tk.Tk):
         widths = {"chk": 28, "facility": 200, "org": 180, "city": 100,
                   "st": 36, "date": 100, "type": 52, "subtype": 70,
                   "pollutants": 160, "status": 90}
-        heads  = {"chk": "", "facility": "Facility", "org": "Organization",
-                  "city": "City", "st": "St", "date": "Date",
-                  "type": "Type", "subtype": "Sub", "pollutants": "Pollutants",
-                  "status": "Status"}
+        # H7 — sortable headings for results tree
+        self._res_heads = {"chk": "", "facility": "Facility", "org": "Organization",
+                           "city": "City", "st": "St", "date": "Date",
+                           "type": "Type", "subtype": "Sub",
+                           "pollutants": "Pollutants", "status": "Status"}
         for c in cols:
-            self._res_tree.heading(c, text=heads[c])
+            self._res_tree.heading(c, text=self._res_heads[c],
+                                   command=lambda col=c: self._on_res_sort(col))
             self._res_tree.column(c, width=widths[c],
                                   stretch=(c in ("facility", "org", "pollutants")))
 
@@ -271,7 +330,17 @@ class App(tk.Tk):
         self._res_tree.pack(side="left", fill="both", expand=True)
         vsb2.pack(side="right", fill="y")
 
+        # H6 — full row click toggles checkbox
         self._res_tree.bind("<ButtonRelease-1>", self._toggle_checkbox)
+
+        # M9 — empty results placeholder
+        self._res_empty_lbl = tk.Label(
+            body, text="No reports found — try broadening your search criteria.",
+            bg="white", fg="#9ca3af", font=("Helvetica", 10), pady=14)
+
+        # L22 — suppress canvas mousewheel when cursor is over the results tree
+        self._res_tree.bind("<Enter>", lambda _: self._canvas.unbind("<MouseWheel>"))
+        self._res_tree.bind("<Leave>", lambda _: self._canvas.bind("<MouseWheel>", self._on_mousewheel))
 
     # ── Step 3: Download progress ──────────────────────────────────────────
 
@@ -287,47 +356,119 @@ class App(tk.Tk):
         self._dl_lbl = tk.Label(prog_row, text="", bg="white",
                                 fg="#111111", font=("Helvetica", 9), width=10)
         self._dl_lbl.pack(side="left", padx=8)
+        self._btn_cancel_dl = tk.Button(
+            prog_row, text="Cancel",
+            bg="#dc2626", fg="white", activebackground="#b91c1c",
+            font=("Helvetica", 9, "bold"), relief="flat", cursor="hand2",
+            padx=6, pady=2, command=self._cancel_download)
+        # Hidden until a download is in progress
+        self._dl_cancel = False
 
+        # M13 — current file label
+        self._dl_file_lbl = tk.Label(body, text="", bg="white", fg="#374151",
+                                     font=("Helvetica", 9), anchor="w")
+        self._dl_file_lbl.pack(fill="x", pady=(0, 4))
+
+        # H11 — log with both scrollbars; L14 — height 8
         log_frame = tk.Frame(body, bg="white")
         log_frame.pack(fill="x")
-        self._dl_log = tk.Text(log_frame, height=5, state="disabled",
+        self._dl_log = tk.Text(log_frame, height=8, state="disabled",
                                bg="#f8fafc", fg="#111111",
                                font=("Courier", 9), relief="flat",
                                wrap="none", borderwidth=0,
                                insertbackground="#111111")
         dl_log_vsb = ttk.Scrollbar(log_frame, orient="vertical",
                                    command=self._dl_log.yview)
-        self._dl_log.configure(yscrollcommand=dl_log_vsb.set)
-        self._dl_log.pack(side="left", fill="both", expand=True)
+        dl_log_hsb = ttk.Scrollbar(log_frame, orient="horizontal",
+                                   command=self._dl_log.xview)
+        self._dl_log.configure(yscrollcommand=dl_log_vsb.set,
+                               xscrollcommand=dl_log_hsb.set)
         dl_log_vsb.pack(side="right", fill="y")
+        dl_log_hsb.pack(side="bottom", fill="x")
+        self._dl_log.pack(side="left", fill="both", expand=True)
+
+        # L22 — suppress canvas scroll when over log
+        self._dl_log.bind("<Enter>", lambda _: self._canvas.unbind("<MouseWheel>"))
+        self._dl_log.bind("<Leave>", lambda _: self._canvas.bind("<MouseWheel>", self._on_mousewheel))
 
     # ── Step 4: Scan ───────────────────────────────────────────────────────
 
     def _build_scan_section(self):
         self._scan_card, body = self._card(
-            self._main, 4, "DEVIATION SCAN", hidden=True)
+            self._main, 4, "DEVIATION SCAN", hidden=False)
         body.configure(padx=0, pady=0)
 
-        # Toolbar
+        # ── Toolbar ─────────────────────────────────────────────────────────
         tb = tk.Frame(body, bg="#f8fafc", pady=6, padx=10)
         tb.pack(fill="x")
+        # H16 — scan button starts disabled; enabled when ZIPs exist
         self._btn_scan = tk.Button(
             tb, text="  \U0001f50d  Scan for Deviations  ",
             bg=C_BTN_AMB, fg="white", activebackground="#b45309",
             font=("Helvetica", 10, "bold"), relief="flat", cursor="hand2",
-            padx=6, pady=4, command=self._do_scan)
+            padx=6, pady=4, command=self._do_scan, state="disabled")
         self._btn_scan.pack(side="left")
+        self._btn_scan_folder = tk.Button(
+            tb, text="  \U0001f4c2  Scan Local Folder\u2026  ",
+            bg="#4b5563", fg="white", activebackground="#374151",
+            font=("Helvetica", 9, "bold"), relief="flat", cursor="hand2",
+            padx=6, pady=4, command=self._do_scan_folder)
+        self._btn_scan_folder.pack(side="left", padx=4)
+        # M21 — explicit disabled fg for export buttons
         self._btn_export = tk.Button(
             tb, text="  Export CSV  ",
-            bg="#e5e7eb", fg="#374151", relief="flat",
+            bg="#e5e7eb", fg="#9ca3af", relief="flat",
+            disabledforeground="#9ca3af",
             font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
             command=self._do_export, state="disabled")
-        self._btn_export.pack(side="left", padx=8)
+        self._btn_export.pack(side="left", padx=4)
+        self._btn_export_xlsx = tk.Button(
+            tb, text="  Export XLSX  ",
+            bg="#e5e7eb", fg="#9ca3af", relief="flat",
+            disabledforeground="#9ca3af",
+            font=("Helvetica", 9), cursor="hand2", padx=6, pady=4,
+            command=self._do_export_xlsx, state="disabled")
+        self._btn_export_xlsx.pack(side="left", padx=4)
         self._scan_count_lbl = tk.Label(tb, text="", bg="#f8fafc",
                                         fg="#111111", font=("Helvetica", 9))
         self._scan_count_lbl.pack(side="left", padx=12)
 
-        # Scan progress bar (hidden until scan runs)
+        # ── Filter bar ───────────────────────────────────────────────────────
+        fb = tk.Frame(body, bg="#eef1f5", pady=5, padx=10)
+        fb.pack(fill="x")
+        tk.Label(fb, text="Search (facility, pollutant, notes):",  # M19
+                 bg="#eef1f5", fg="#111111",
+                 font=("Helvetica", 9, "bold")).pack(side="left")
+        self._filter_var = tk.StringVar()
+        self._filter_var.trace_add("write", lambda *_: self._apply_scan_filter())
+        tk.Entry(fb, textvariable=self._filter_var, width=28,
+                 bg="white", fg="#111111", insertbackground="#111111",
+                 relief="solid", bd=1, font=("Helvetica", 10)
+                 ).pack(side="left", padx=(4, 12))
+        tk.Label(fb, text="Show:", bg="#eef1f5", fg="#111111",
+                 font=("Helvetica", 9, "bold")).pack(side="left")
+        self._filter_result_var = tk.StringVar(value="All")
+        result_cb = ttk.Combobox(fb, textvariable=self._filter_result_var, width=14,
+                                  state="readonly",
+                                  # M17 — "Review PDF" → "Manual Review"
+                                  values=["All", "Deviations", "Manual Review", "Pass", "Errors"])
+        result_cb.pack(side="left", padx=4)
+        result_cb.bind("<<ComboboxSelected>>", lambda _: self._apply_scan_filter())
+        tk.Button(fb, text="Clear", bg="#e5e7eb", fg="#374151", relief="flat",
+                  font=("Helvetica", 9), cursor="hand2", padx=6,
+                  command=self._clear_filter).pack(side="left", padx=8)
+
+        # L24 — fallback warning as full-width strip below filter bar;
+        # always packed — collapses to 0 height when label text is empty
+        self._fallback_strip = tk.Frame(body, bg="#fef3c7")
+        self._fallback_strip.pack(fill="x")
+        self._fallback_lbl   = tk.Label(self._fallback_strip,
+                                        text="", bg="#fef3c7",
+                                        fg="#92400e", font=("Helvetica", 9),
+                                        anchor="w", padx=10)
+        self._fallback_lbl.pack(fill="x")
+
+        # ── Scan progress bar (hidden until scan runs) ───────────────────────
         self._scan_prog_frame = tk.Frame(body, bg="white", padx=14, pady=6)
         self._scan_prog_frame.pack(fill="x")
         self._scan_prog_frame.pack_forget()
@@ -339,46 +480,59 @@ class App(tk.Tk):
                                   fg="#111111", font=("Helvetica", 9), width=12)
         self._scan_lbl.pack(side="left", padx=8)
 
-        # Summary label
+        # ── Summary label — M20: larger, bold, more prominent ────────────────
         self._scan_summary = tk.Label(body, text="", bg="white",
-                                      font=("Helvetica", 10, "bold"),
-                                      anchor="w", padx=14, pady=4)
+                                      font=("Helvetica", 12, "bold"),
+                                      anchor="w", padx=14, pady=8)
         self._scan_summary.pack(fill="x")
         self._scan_summary.pack_forget()
 
-        # Results treeview
+        # ── Results treeview ─────────────────────────────────────────────────
         scols = ("result", "facility", "st", "date", "type",
                  "location", "pollutant", "measured", "limit",
-                 "pct", "unit", "regulation", "notes")
+                 "pct", "notes")
         self._scan_tree = ttk.Treeview(
-            body, columns=scols, show="headings", height=14)
+            body, columns=scols, show="tree headings", height=14)
 
-        sheads = {"result": "Result", "facility": "Facility", "st": "St",
-                  "date": "Date", "type": "Type", "location": "Location",
-                  "pollutant": "Pollutant", "measured": "Measured",
-                  "limit": "Limit", "pct": "% of Lim",
-                  "unit": "Unit", "regulation": "Regulation", "notes": "Notes"}
+        self._scan_tree.heading("#0", text="")
+        self._scan_tree.column("#0", width=20, stretch=False, minwidth=20)
+
+        # H15 — headings with sort direction tracking
+        self._scan_heads = {
+            "result":   "Result",   "facility": "Facility",
+            "st":       "St",       "date":     "Date",
+            "type":     "Type",     "location": "Location / Sheet",
+            "pollutant":"Pollutant / Citation",
+            "measured": "Measured", "limit":    "Limit",
+            "pct":      "% of Lim", "notes":    "Notes",
+        }
         swidths = {"result": 80, "facility": 180, "st": 36, "date": 90,
-                   "type": 52, "location": 70, "pollutant": 160,
+                   "type": 52, "location": 90, "pollutant": 180,
                    "measured": 80, "limit": 70, "pct": 68,
-                   "unit": 140, "regulation": 140, "notes": 160}
+                   "notes": 220}
         for c in scols:
-            self._scan_tree.heading(c, text=sheads[c])
+            self._scan_tree.heading(
+                c, text=self._scan_heads[c],
+                command=lambda col=c: self._on_scan_sort(col))
             self._scan_tree.column(
                 c, width=swidths[c],
-                stretch=(c in ("facility", "pollutant", "unit", "regulation", "notes")))
+                stretch=(c in ("facility", "pollutant", "notes")))
 
         self._scan_tree.tag_configure("deviation",
                                       background=C_DEV_BG, foreground=C_DEV_FG)
-        self._scan_tree.tag_configure("error",    background=C_ERR_BG)
-        self._scan_tree.tag_configure("nolimit",  foreground="#6b7280")
+        self._scan_tree.tag_configure("error",       background=C_ERR_BG)
+        self._scan_tree.tag_configure("nolimit",     foreground="#6b7280")
+        self._scan_tree.tag_configure("manualreview", background="#fff7e6",
+                                      foreground="#92400e")
+        self._scan_tree.tag_configure("fallback",    foreground="#b45309")
 
-        scan_vsb = ttk.Scrollbar(body, orient="vertical",
-                                 command=self._scan_tree.yview)
         scan_hsb = ttk.Scrollbar(body, orient="horizontal",
-                                 command=self._scan_tree.xview)
+                                  command=self._scan_tree.xview)
+        scan_vsb = ttk.Scrollbar(body, orient="vertical",
+                                  command=self._scan_tree.yview)
         self._scan_tree.configure(yscrollcommand=scan_vsb.set,
                                   xscrollcommand=scan_hsb.set)
+        scan_hsb.pack(side="bottom", fill="x")
         self._scan_tree.pack(side="left", fill="both", expand=True)
         scan_vsb.pack(side="right", fill="y")
 
@@ -387,6 +541,16 @@ class App(tk.Tk):
             text="Click  Scan for Deviations  to analyze all downloaded reports.",
             bg="white", fg="#9ca3af", font=("Helvetica", 10), pady=16)
         self._scan_placeholder.pack()
+
+        # M18 — double-click opens the downloads folder
+        self._scan_tree.bind("<Double-1>", self._open_scan_result_folder)
+
+        # L22/L28 — suppress canvas mousewheel when over scan treeview
+        self._scan_tree.bind("<Enter>", lambda _: self._canvas.unbind("<MouseWheel>"))
+        self._scan_tree.bind("<Leave>", lambda _: self._canvas.bind("<MouseWheel>", self._on_mousewheel))
+
+        # Update sort heading indicator for default sort
+        self._update_scan_sort_heading()
 
     # ── Canvas / scroll helpers ────────────────────────────────────────────
 
@@ -402,14 +566,13 @@ class App(tk.Tk):
     # ── Checkbox helpers ───────────────────────────────────────────────────
 
     def _toggle_checkbox(self, event):
+        # H6 — toggle on any cell click, not just the checkbox column
         region = self._res_tree.identify_region(event.x, event.y)
-        col    = self._res_tree.identify_column(event.x)
         iid    = self._res_tree.identify_row(event.y)
         if region != "cell" or not iid:
             return
-        if col == "#1":  # checkbox column
-            self._selected[iid] = not self._selected.get(iid, False)
-            self._refresh_checkbox(iid)
+        self._selected[iid] = not self._selected.get(iid, False)
+        self._refresh_checkbox(iid)
 
     def _refresh_checkbox(self, iid):
         vals = list(self._res_tree.item(iid, "values"))
@@ -426,7 +589,7 @@ class App(tk.Tk):
             self._selected[iid] = False
             self._refresh_checkbox(iid)
 
-    # ── Status helpers ─────────────────────────────────────────────────────
+    # ── Status / card helpers ──────────────────────────────────────────────
 
     def _set_status(self, msg):
         self._status_var.set(msg)
@@ -434,15 +597,88 @@ class App(tk.Tk):
     def _show_card(self, card_outer):
         card_outer.pack(fill="x", pady=(0, 12))
 
+    # H16 — enable/disable scan button based on whether ZIPs exist
+    def _refresh_scan_button_state(self):
+        has_zips = any(DOWNLOAD_DIR.glob("*.zip"))
+        self._btn_scan.configure(state="normal" if has_zips else "disabled")
+
+    # ── Sort helpers ───────────────────────────────────────────────────────
+
+    def _update_scan_sort_heading(self):
+        """Refresh scan treeview headings to show ▲/▼ on active column."""
+        indicator = _SORT_ASC if self._sort_asc else _SORT_DESC
+        for c in self._scan_heads:
+            base = self._scan_heads[c]
+            text = base + indicator if c == self._sort_col else base
+            self._scan_tree.heading(c, text=text)
+
+    def _update_res_sort_heading(self):
+        """Refresh results treeview headings to show ▲/▼ on active column."""
+        if self._res_sort_col is None:
+            return
+        indicator = _SORT_ASC if self._res_sort_asc else _SORT_DESC
+        for c in self._res_heads:
+            base = self._res_heads[c]
+            text = base + indicator if c == self._res_sort_col else base
+            self._res_tree.heading(c, text=text,
+                                   command=lambda col=c: self._on_res_sort(col))
+
     # ─────────────────────────────────────────────────────────────────────
     # Actions
     # ─────────────────────────────────────────────────────────────────────
 
+    # ── Keyboard shortcut handlers (H25) ───────────────────────────────────
+
+    def _kb_search(self, event=None):
+        if self._btn_search["state"] != "disabled":
+            self._do_search()
+
+    def _kb_select_all(self, _event=None):
+        if self._res_tree.winfo_ismapped() and self._reports:
+            self._select_all()
+            return "break"
+
+    def _kb_export(self, _event=None):
+        if self._scan_rows:
+            self._do_export()
+            return "break"
+
+    def _kb_cancel(self, _event=None):
+        if not self._dl_cancel and self._btn_cancel_dl.winfo_ismapped():
+            self._cancel_download()
+
     # ── Search ─────────────────────────────────────────────────────────────
 
-    def _do_search(self):
+    def _reset_search(self):
+        """M3 — clear all search fields."""
+        self._fac_var.set("")
+        self._org_var.set("")
+        self._city_var.set("")
+        self._zip_var.set("")
+        self._start_var.set("")
+        self._end_var.set("")
+        self._cfrsub_var.set("")
+        state_values = [f"{v}  —  {l}" for v, l in core.STATE_OPTIONS]
+        self._state_var.set(state_values[0])
+        self._cfrpart_var.set("All")
+        self._search_lbl.configure(text="")
+
+    def _do_search(self, _event=None):
+        # H1 — validate date fields before firing
+        import re
+        date_pat = re.compile(r"^\d{2}/\d{2}/\d{4}$")
+        for label, var in (("Start Date", self._start_var), ("End Date", self._end_var)):
+            val = var.get().strip()
+            if val and not date_pat.match(val):
+                messagebox.showerror("Invalid Date",
+                                     f"{label} must be in MM/DD/YYYY format.\nGot: {val!r}")
+                return
+
         self._btn_search.configure(state="disabled", text="  Searching…  ")
         self._search_lbl.configure(text="")
+        # M4 — show spinner
+        self._search_spinner.pack(side="left", padx=(0, 8))
+        self._search_spinner.start(12)
         self._set_status("Connecting to WebFIRE…")
 
         def worker():
@@ -450,15 +686,15 @@ class App(tk.Tk):
                 if self._session is None:
                     self._session = core.build_session()
                 params = {
-                    "facility":   self._fac_var.get().strip(),
+                    "facility":     self._fac_var.get().strip(),
                     "organization": self._org_var.get().strip(),
-                    "state":      self._state_var.get().split("  —  ")[0].strip(),
-                    "city":       self._city_var.get().strip(),
-                    "zip":        self._zip_var.get().strip(),
-                    "startdate":  self._start_var.get().strip(),
-                    "enddate":    self._end_var.get().strip(),
-                    "CFRpart":    _cfr_value(self._cfrpart_var.get()),
-                    "CFRSubpart": self._cfrsub_var.get().strip(),
+                    "state":        self._state_var.get().split("  —  ")[0].strip(),
+                    "city":         self._city_var.get().strip(),
+                    "zip":          self._zip_var.get().strip(),
+                    "startdate":    self._start_var.get().strip(),
+                    "enddate":      self._end_var.get().strip(),
+                    "CFRpart":      _cfr_value(self._cfrpart_var.get()),
+                    "CFRSubpart":   self._cfrsub_var.get().strip(),
                 }
                 reports = core.search(self._session, params)
                 self.after(0, lambda: self._on_search_done(reports))
@@ -468,6 +704,10 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_search_done(self, reports):
+        # M4 — stop spinner
+        self._search_spinner.stop()
+        self._search_spinner.pack_forget()
+
         self._reports  = reports
         self._selected = {}
 
@@ -495,20 +735,74 @@ class App(tk.Tk):
             text=f"{n} report{'s' if n != 1 else ''} found")
         self._search_lbl.configure(
             text=f"{n} result{'s' if n != 1 else ''}", fg="#16a34a")
-        self._btn_search.configure(state="normal",
-                                   text="  Search WebFIRE  ")
+        self._btn_search.configure(state="normal", text="  Search WebFIRE  ")
         self._set_status(f"Search complete — {n} reports found")
+
+        # M9 — show/hide empty placeholder
+        if n == 0:
+            self._res_empty_lbl.pack(pady=12)
+        else:
+            self._res_empty_lbl.pack_forget()
+
         self._show_card(self._results_card)
         self._show_card(self._dl_card)
         self._show_card(self._scan_card)
 
+        # Reset results sort state
+        self._res_sort_col = None
+        self._res_sort_asc = True
+
     def _on_search_error(self, msg):
+        # M4 — stop spinner
+        self._search_spinner.stop()
+        self._search_spinner.pack_forget()
+
         self._session = None   # force session rebuild next time
-        self._btn_search.configure(state="normal",
-                                   text="  Search WebFIRE  ")
+        self._btn_search.configure(state="normal", text="  Search WebFIRE  ")
         self._search_lbl.configure(text="Search failed", fg="#dc2626")
         self._set_status(f"Error: {msg}")
         messagebox.showerror("Search Failed", msg)
+
+    # ── Results sort (H7) ──────────────────────────────────────────────────
+
+    def _on_res_sort(self, col: str):
+        if col == "chk":
+            return  # checkbox column — not sortable
+        if self._res_sort_col == col:
+            self._res_sort_asc = not self._res_sort_asc
+        else:
+            self._res_sort_col = col
+            self._res_sort_asc = True
+
+        _COL_FIELD = {
+            "facility":  "facility", "org":  "organization",
+            "city":      "city",     "st":   "state",
+            "date":      "date",     "type": "report_type",
+            "subtype":   "report_subtype", "pollutants": "pollutants",
+            "status":    "downloaded",
+        }
+        field = _COL_FIELD.get(col, col)
+        sorted_reports = sorted(
+            self._reports,
+            key=lambda r: str(r.get(field, "")).lower(),
+            reverse=not self._res_sort_asc)
+
+        self._res_tree.delete(*self._res_tree.get_children())
+        for r in sorted_reports:
+            cached = r.get("downloaded", False)
+            chk    = "\u2611" if self._selected.get(r["id"], False) else "\u2610"
+            self._res_tree.insert(
+                "", "end", iid=r["id"],
+                values=(chk,
+                        r["facility"], r["organization"],
+                        r["city"], r["state"],
+                        r["date"][:10],
+                        r["report_type"], r["report_subtype"],
+                        r["pollutants"][:60],
+                        "Downloaded" if cached else "Pending"),
+                tags=("cached",) if cached else ())
+
+        self._update_res_sort_heading()
 
     # ── Download ───────────────────────────────────────────────────────────
 
@@ -519,15 +813,18 @@ class App(tk.Tk):
                                 "Check at least one report to download.")
             return
 
-        by_id    = {r["id"]: r for r in self._reports}
-        targets  = [by_id[i] for i in ids if i in by_id]
+        by_id   = {r["id"]: r for r in self._reports}
+        targets = [by_id[i] for i in ids if i in by_id]
         if not targets:
             return
 
+        self._dl_cancel = False
         self._btn_download.configure(state="disabled")
+        self._btn_cancel_dl.pack(side="left", padx=(0, 4))
         self._dl_bar["maximum"] = len(targets)
         self._dl_bar["value"]   = 0
         self._dl_lbl.configure(text=f"0 / {len(targets)}")
+        self._dl_file_lbl.configure(text="")
         self._dl_log.configure(state="normal")
         self._dl_log.delete("1.0", "end")
         self._dl_log.configure(state="disabled")
@@ -537,6 +834,12 @@ class App(tk.Tk):
             session = self._session
             session.headers["Referer"] = core.BASE_URL + "eSearchResults.cfm"
             for rpt in targets:
+                if self._dl_cancel:
+                    break
+                # M13 — show current file name
+                self.after(0, lambda r=rpt:
+                           self._dl_file_lbl.configure(
+                               text=f"Downloading: {r['id']}  —  {r['facility'][:60]}"))
                 ok, path, msg = core.download_report(
                     session, rpt["id"], DOWNLOAD_DIR)
                 label = "cached" if msg == "already cached" \
@@ -552,7 +855,7 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_dl_progress(self, rpt, label, icon):
-        done = int(self._dl_bar["value"]) + 1
+        done  = int(self._dl_bar["value"]) + 1
         total = int(self._dl_bar["maximum"])
         self._dl_bar["value"] = done
         self._dl_lbl.configure(text=f"{done} / {total}")
@@ -573,10 +876,27 @@ class App(tk.Tk):
                 vals[9] = "Error"
                 self._res_tree.item(rpt["id"], values=vals)
 
+    def _cancel_download(self):
+        self._dl_cancel = True
+        self._btn_cancel_dl.configure(state="disabled")
+        # M12 — clearer cancelling message
+        self._set_status("Cancelling — finishing current file…")
+
     def _on_dl_done(self):
+        self._btn_cancel_dl.pack_forget()
+        self._btn_cancel_dl.configure(state="normal")
         self._btn_download.configure(state="normal")
+        self._dl_file_lbl.configure(text="")
+        done  = int(self._dl_bar["value"])
         total = int(self._dl_bar["maximum"])
-        self._set_status(f"Download complete — {total} report{'s' if total != 1 else ''}")
+        if self._dl_cancel and done < total:
+            self._set_status(
+                f"Download cancelled — {done} of {total} completed")
+        else:
+            self._set_status(
+                f"Download complete — {total} report{'s' if total != 1 else ''}")
+        # H16 — refresh scan button now that files may exist
+        self._refresh_scan_button_state()
 
     # ── Scan ───────────────────────────────────────────────────────────────
 
@@ -591,7 +911,9 @@ class App(tk.Tk):
             return
 
         self._btn_scan.configure(state="disabled")
-        self._btn_export.configure(state="disabled")
+        self._btn_scan_folder.configure(state="disabled")
+        self._btn_export.configure(state="disabled",   fg="#9ca3af")
+        self._btn_export_xlsx.configure(state="disabled", fg="#9ca3af")
         self._scan_rows = []
         self._scan_tree.delete(*self._scan_tree.get_children())
         self._scan_summary.pack_forget()
@@ -608,7 +930,70 @@ class App(tk.Tk):
                 rows = core.scan_report(path, rpt)
                 self.after(0, lambda r=rows, total=len(targets):
                            self._on_scan_progress(r, total))
+            self.after(0, self._on_scan_done)
 
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_scan_folder(self):
+        folder = filedialog.askdirectory(
+            title="Select folder containing downloaded report ZIPs",
+            initialdir=str(DOWNLOAD_DIR))
+        if not folder:
+            return
+
+        from pathlib import Path as _P
+        zips = sorted(_P(folder).glob("*.zip"))
+        if not zips:
+            messagebox.showinfo("No ZIPs found",
+                                f"No .zip files found in:\n{folder}")
+            return
+
+        known = {r["id"]: r for r in self._reports}
+
+        targets = []
+        for z in zips:
+            rid = z.stem
+            if rid in known:
+                meta = known[rid]
+            else:
+                rtype     = core.classify_report(z)
+                file_meta = core.extract_file_meta(z)
+                meta = {
+                    "id":             rid,
+                    "facility":       file_meta["facility"] or rid,
+                    "city":           file_meta["city"],
+                    "state":          file_meta["state"],
+                    "date":           "",
+                    "report_type":    rtype,
+                    "organization":   "",
+                    "county":         "",
+                    "report_subtype": "",
+                    "pollutants":     "",
+                    "downloaded":     True,
+                    "scanned":        False,
+                    "_zip_path":      str(z),
+                }
+            targets.append((z, meta))
+
+        self._btn_scan.configure(state="disabled")
+        self._btn_scan_folder.configure(state="disabled")
+        self._btn_export.configure(state="disabled",   fg="#9ca3af")
+        self._btn_export_xlsx.configure(state="disabled", fg="#9ca3af")
+        self._scan_rows = []
+        self._scan_tree.delete(*self._scan_tree.get_children())
+        self._scan_summary.pack_forget()
+        self._scan_placeholder.pack_forget()
+        self._scan_prog_frame.pack(fill="x")
+        self._scan_bar["maximum"] = len(targets)
+        self._scan_bar["value"]   = 0
+        self._scan_lbl.configure(text=f"0 / {len(targets)}")
+        self._set_status(f"Scanning {len(targets)} ZIPs from {_P(folder).name}/…")
+
+        def worker():
+            for z, rpt in targets:
+                rows = core.scan_report(z, rpt)
+                self.after(0, lambda r=rows, total=len(targets):
+                           self._on_scan_progress(r, total))
             self.after(0, self._on_scan_done)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -619,69 +1004,255 @@ class App(tk.Tk):
         self._scan_bar["value"] = done
         self._scan_lbl.configure(text=f"{done} / {total}")
 
-        for row in new_rows:
-            dev = row.get("deviation", "")
-            if dev == "error":
-                tag = "error"
-            elif dev == "YES":
-                tag = "deviation"
-            elif dev == "no limit":
-                tag = "nolimit"
-            else:
-                tag = ""
+        if new_rows:
+            self._insert_report_group(new_rows)
+
+        flagged     = sum(1 for r in self._scan_rows if r.get("deviation") == "YES")
+        need_review = sum(1 for r in self._scan_rows if r.get("deviation") == "manual-review")
+        n           = len(self._scan_rows)
+        review_str  = f"  ·  {need_review} need review" if need_review else ""
+        self._scan_count_lbl.configure(
+            text=f"{n} finding{'s' if n != 1 else ''}  ·  "
+                 f"{flagged} deviation{'s' if flagged != 1 else ''} flagged"
+                 f"{review_str}")
+
+    def _insert_report_group(self, rows: list, parent_iid: str = ""):
+        if not rows:
+            return
+        first     = rows[0]
+        report_id = str(first.get("report_id", id(rows)))
+
+        if self._scan_tree.exists(report_id):
+            report_id = f"{report_id}_{len(self._scan_tree.get_children())}"
+
+        deviations = [r for r in rows if r.get("deviation") == "YES"]
+        reviews    = [r for r in rows if r.get("deviation") == "manual-review"]
+        errors     = [r for r in rows if r.get("deviation") == "error"]
+        n_pass     = len(rows) - len(deviations) - len(reviews) - len(errors)
+
+        if deviations:
+            agg_result, agg_tag = "DEVIATION",     "deviation"
+        elif reviews:
+            agg_result, agg_tag = "Manual Review", "manualreview"  # M17
+        elif errors:
+            agg_result, agg_tag = "Error",         "error"
+        else:
+            agg_result, agg_tag = "Pass",          ""
+
+        parts = []
+        if deviations: parts.append(f"{len(deviations)} DEVIATION")
+        if reviews:    parts.append(f"{len(reviews)} Manual Review")   # M17
+        if errors:     parts.append(f"{len(errors)} Error")
+        if n_pass:     parts.append(f"{n_pass} Pass")
+        parent_notes = (f"{len(rows)} findings — " + ", ".join(parts)) if len(rows) > 1 else ""
+
+        self._scan_tree.insert(
+            parent_iid, "end", iid=report_id, open=True,
+            values=(agg_result,
+                    first.get("facility", "")[:40],
+                    first.get("state", ""),
+                    str(first.get("date", ""))[:10],
+                    first.get("report_type", ""),
+                    "", "", "", "", "",
+                    parent_notes),
+            tags=(agg_tag,) if agg_tag else ())
+
+        for idx, row in enumerate(rows):
+            child_iid = f"{report_id}_c{idx}"
+            dev       = row.get("deviation", "")
+            is_aer    = row.get("report_type", "") == "AER"
+
+            if dev == "error":          child_tag = "error"
+            elif dev == "YES":          child_tag = "deviation"
+            elif dev == "manual-review":child_tag = "manualreview"
+            elif dev == "no limit":     child_tag = "nolimit"
+            else:                       child_tag = ""
 
             result_label = {
-                "YES":      "DEVIATION",
-                "no":       "Pass",
-                "no limit": "No Limit",
-                "error":    "Error",
+                "YES":           "DEVIATION",
+                "no":            "Pass",
+                "no limit":      "No Limit",
+                "error":         "Error",
+                "manual-review": "Manual Review",  # M17
+                "count-only":    "Count Only",
             }.get(dev, dev)
 
-            pct = row.get("pct_of_limit", "")
-            pct_str = f"{pct}%" if pct != "" else "—"
+            if is_aer:
+                location_val  = row.get("sheet",       row.get("location", ""))
+                pollutant_val = row.get("citation",     row.get("pollutant", ""))
+                measured_val  = ""
+                limit_val     = "—"
+                pct_str       = "—"
+                notes_val     = row.get("description", row.get("error", ""))
+            else:
+                location_val  = row.get("location", "")
+                pollutant_val = row.get("pollutant", "")
+                measured_val  = row.get("avg_measured", "")
+                pct           = row.get("pct_of_limit", "")
+                pct_str       = f"{pct}%" if pct != "" else "—"
+                limit_val     = row.get("limit", "") or "—"
+                notes_val     = row.get("error", "")
 
             self._scan_tree.insert(
-                "", "end",
+                report_id, "end", iid=child_iid,
                 values=(result_label,
-                        row.get("facility", "")[:40],
-                        row.get("state", ""),
-                        str(row.get("date", ""))[:10],
-                        row.get("report_type", ""),
-                        row.get("location", ""),
-                        row.get("pollutant", ""),
-                        row.get("avg_measured", ""),
-                        row.get("limit", "") or "—",
+                        "",
+                        "",
+                        "",
+                        "",
+                        location_val,
+                        pollutant_val,
+                        measured_val,
+                        limit_val,
                         pct_str,
-                        row.get("unit", ""),
-                        row.get("regulation", ""),
-                        row.get("error", "")),
-                tags=(tag,) if tag else ())
+                        notes_val),
+                tags=(child_tag,) if child_tag else ())
 
-        flagged = sum(1 for r in self._scan_rows if r.get("deviation") == "YES")
-        n = len(self._scan_rows)
-        self._scan_count_lbl.configure(
-            text=f"{n} comparison{'s' if n != 1 else ''}  ·  "
-                 f"{flagged} deviation{'s' if flagged != 1 else ''} flagged")
+    # M18 — double-click opens the downloads folder in Finder/Explorer
+    def _open_scan_result_folder(self, event=None):
+        iid = self._scan_tree.focus()
+        if not iid:
+            return
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(DOWNLOAD_DIR)])
+            elif sys.platform == "win32":
+                subprocess.Popen(["explorer", str(DOWNLOAD_DIR)])
+            else:
+                subprocess.Popen(["xdg-open", str(DOWNLOAD_DIR)])
+        except Exception:
+            pass
+
+    # ── Scan filter / sort ─────────────────────────────────────────────────
+
+    def _clear_filter(self):
+        self._filter_var.set("")
+        self._filter_result_var.set("All")
+        self._apply_scan_filter()
+
+    def _on_scan_sort(self, col: str):
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = True
+        self._apply_scan_filter()
+        self._update_scan_sort_heading()  # H15
+
+    def _apply_scan_filter(self):
+        if not self._scan_rows:
+            return
+
+        filter_text   = (self._filter_var.get() if self._filter_var else "").lower().strip()
+        filter_result = self._filter_result_var.get() if self._filter_result_var else "All"
+
+        # M17 — "Manual Review" maps to "manual-review"
+        _RESULT_DEV_MAP = {
+            "Deviations":    "YES",
+            "Manual Review": "manual-review",
+            "Pass":          "no",
+            "Errors":        "error",
+        }
+        filter_dev = _RESULT_DEV_MAP.get(filter_result)
+
+        groups: dict[str, list] = {}
+        for row in self._scan_rows:
+            rid = str(row.get("report_id", ""))
+            groups.setdefault(rid, []).append(row)
+
+        filtered_groups = []
+        for rid, rows in groups.items():
+            if filter_dev:
+                matched = [r for r in rows if r.get("deviation") == filter_dev]
+            else:
+                matched = rows[:]
+
+            if filter_text:
+                def _row_text(r):
+                    return " ".join([
+                        str(r.get("facility",    "")),
+                        str(r.get("citation",    "")),
+                        str(r.get("pollutant",   "")),
+                        str(r.get("sheet",       "")),
+                        str(r.get("location",    "")),
+                        str(r.get("description", "")),
+                        str(r.get("error",       "")),
+                    ]).lower()
+                facility_match = filter_text in str(rows[0].get("facility", "")).lower()
+                matched = [r for r in matched
+                           if facility_match or filter_text in _row_text(r)]
+
+            if matched:
+                filtered_groups.append((rid, matched))
+
+        _COL_KEY = {
+            "result":   lambda g: _agg_result_rank(g[1]),
+            "facility": lambda g: str(g[1][0].get("facility", "")).lower(),
+            "st":       lambda g: str(g[1][0].get("state", "")).lower(),
+            "date":     lambda g: str(g[1][0].get("date", "")),
+            "type":     lambda g: str(g[1][0].get("report_type", "")).lower(),
+            "pollutant":lambda g: str(g[1][0].get("citation",
+                                       g[1][0].get("pollutant", ""))).lower(),
+            "notes":    lambda g: str(g[1][0].get("description",
+                                       g[1][0].get("error", ""))).lower(),
+        }
+        sort_key = _COL_KEY.get(self._sort_col, _COL_KEY["date"])
+        filtered_groups.sort(key=sort_key, reverse=not self._sort_asc)
+
+        self._scan_tree.delete(*self._scan_tree.get_children())
+        for rid, rows in filtered_groups:
+            self._insert_report_group(rows)
+
+        # L24 — fallback as full-width strip
+        n_fallback = sum(1 for r in self._scan_rows if r.get("fallback_used"))
+        if n_fallback:
+            unmatched = list({r.get("unmatched_citation", "")
+                              for r in self._scan_rows if r.get("fallback_used")
+                              and r.get("unmatched_citation")})
+            self._fallback_lbl.configure(
+                text=f"\u26a0  {n_fallback} finding(s) used keyword fallback routing"
+                     + (f"  —  citations: {', '.join(unmatched)}" if unmatched else ""),
+                pady=4)
+        else:
+            self._fallback_lbl.configure(text="", pady=0)
 
     def _on_scan_done(self):
         self._scan_prog_frame.pack_forget()
-        flagged = sum(1 for r in self._scan_rows if r.get("deviation") == "YES")
-        n = len(self._scan_rows)
+        flagged     = sum(1 for r in self._scan_rows if r.get("deviation") == "YES")
+        need_review = sum(1 for r in self._scan_rows if r.get("deviation") == "manual-review")
+        n           = len(self._scan_rows)
 
         if flagged:
-            msg   = f"\u26a0\ufe0f  {flagged} potential deviation{'s' if flagged != 1 else ''} flagged — review highlighted rows"
+            review_note = (f"  |  {need_review} require manual review"  # M17
+                           if need_review else "")
+            msg   = (f"\u26a0  {flagged} potential deviation"
+                     f"{'s' if flagged != 1 else ''} flagged — "
+                     f"review highlighted rows{review_note}")
             color = C_DEV_FG
+        elif need_review:
+            msg   = (f"\u26a0  {need_review} report"
+                     f"{'s' if need_review != 1 else ''} require manual review")  # M17
+            color = "#92400e"
         else:
-            msg   = f"\u2705  No deviations detected in {n} comparisons across all downloaded reports"
+            msg   = (f"\u2705  No deviations detected across {n} finding"
+                     f"{'s' if n != 1 else ''} from all downloaded reports")
             color = "#15803d"
 
         self._scan_summary.configure(text=msg, fg=color)
         self._scan_summary.pack(fill="x")
         self._btn_scan.configure(state="normal")
+        self._btn_scan_folder.configure(state="normal")
         if self._scan_rows:
-            self._btn_export.configure(state="normal")
-        self._set_status(
-            f"Scan complete — {n} comparisons, {flagged} flagged")
+            self._btn_export.configure(state="normal",      fg="#374151")
+            self._btn_export_xlsx.configure(state="normal", fg="#374151")
+
+        # M26 — update window title with summary
+        self.title(
+            f"WebFIRE Deviation Scanner  —  {n} findings"
+            + (f"  |  {flagged} deviation{'s' if flagged != 1 else ''}" if flagged else ""))
+
+        self._set_status(f"Scan complete — {n} findings, {flagged} flagged")
+        self._apply_scan_filter()
 
     # ── Export CSV ─────────────────────────────────────────────────────────
 
@@ -695,21 +1266,198 @@ class App(tk.Tk):
             title="Save scan results")
         if not path:
             return
-        fields = ["report_id", "facility", "city", "state", "date",
-                  "report_type", "location", "pollutant", "unit",
-                  "n_runs", "avg_measured", "limit", "pct_of_limit",
-                  "regulation", "deviation", "error"]
+        fields = [
+            "report_id", "facility", "city", "state", "date",
+            "report_type", "deviation", "error",
+            "location", "pollutant", "unit",
+            "n_runs", "avg_measured", "limit", "pct_of_limit", "regulation",
+            "sheet", "description",
+        ]
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(self._scan_rows)
         self._set_status(f"Exported {len(self._scan_rows)} rows → {Path(path).name}")
 
+    # ── Export XLSX ────────────────────────────────────────────────────────
+
+    def _do_export_xlsx(self):
+        if not self._scan_rows:
+            return
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+        except ImportError:
+            messagebox.showerror(
+                "Missing dependency",
+                "openpyxl is required for XLSX export.\n\nRun:  pip install openpyxl")
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel workbook", "*.xlsx"), ("All files", "*.*")],
+            initialfile="deviations.xlsx",
+            title="Save scan results as Excel workbook")
+        if not path:
+            return
+
+        _IDENTITY = [
+            ("report_id",    "Report ID",   14),
+            ("facility",     "Facility",    28),
+            ("city",         "City",        16),
+            ("state",        "State",        6),
+            ("date",         "Date",        12),
+            ("deviation",    "Deviation",   12),
+        ]
+        ST_COLS = _IDENTITY + [
+            ("location",     "Location",   20),
+            ("pollutant",    "Pollutant",  24),
+            ("unit",         "Unit",       18),
+            ("n_runs",       "Runs",        6),
+            ("avg_measured", "Measured",   12),
+            ("limit",        "Limit",      12),
+            ("pct_of_limit", "% of Limit", 10),
+            ("regulation",   "Regulation", 20),
+            ("error",        "Notes",      36),
+        ]
+        AER_COLS = _IDENTITY + [
+            ("citation",    "Citation",    20),
+            ("sheet",       "Sheet",       24),
+            ("description", "Description", 50),
+        ]
+        ALL_COLS = [
+            ("report_id",    "Report ID",            14),
+            ("facility",     "Facility",              28),
+            ("city",         "City",                  16),
+            ("state",        "State",                  6),
+            ("date",         "Date",                  12),
+            ("report_type",  "Type",                   6),
+            ("deviation",    "Deviation",             12),
+            ("error",        "Notes / Description",   40),
+            ("location",     "Location / Sheet",      22),
+            ("pollutant",    "Pollutant / Citation",  24),
+            ("unit",         "Unit",                  18),
+            ("n_runs",       "Runs",                   6),
+            ("avg_measured", "Measured",              12),
+            ("limit",        "Limit",                 12),
+            ("pct_of_limit", "% of Limit",            10),
+            ("regulation",   "Regulation",            20),
+            ("sheet",        "Sheet",                 22),
+            ("description",  "Description",           40),
+        ]
+
+        tab_defs = [
+            ("Deviations",    [r for r in self._scan_rows if r.get("deviation") == "YES"],            ALL_COLS),
+            ("Manual Review", [r for r in self._scan_rows if r.get("deviation") == "manual-review"],  ALL_COLS),  # M17
+            ("Errors",        [r for r in self._scan_rows if r.get("deviation") == "error"],           ALL_COLS),
+            ("Pass",          [r for r in self._scan_rows if r.get("deviation") == "no"],              ALL_COLS),
+            ("All Results",   self._scan_rows,                                                         ALL_COLS),
+        ]
+
+        HDR_FILL = PatternFill("solid", fgColor="1A3A5C")
+        HDR_FONT = Font(color="FFFFFF", bold=True, size=10)
+        DEV_FILL = PatternFill("solid", fgColor="FFE0E0")
+        REV_FILL = PatternFill("solid", fgColor="FFF7E6")
+        ERR_FILL = PatternFill("solid", fgColor="FFFBE6")
+
+        _FILL_MAP = {
+            "YES":           DEV_FILL,
+            "manual-review": REV_FILL,
+            "error":         ERR_FILL,
+        }
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+
+        for tab_name, rows, col_defs in tab_defs:
+            ws = wb.create_sheet(title=tab_name)
+
+            for col_i, (field, label, width) in enumerate(col_defs, start=1):
+                cell = ws.cell(row=1, column=col_i, value=label)
+                cell.font      = HDR_FONT
+                cell.fill      = HDR_FILL
+                cell.alignment = Alignment(horizontal="center")
+                ws.column_dimensions[
+                    ws.cell(row=1, column=col_i).column_letter
+                ].width = width
+
+            for row_i, row in enumerate(rows, start=2):
+                fill = _FILL_MAP.get(row.get("deviation", ""))
+                for col_i, (field, label, _) in enumerate(col_defs, start=1):
+                    val = row.get(field, "")
+                    if isinstance(val, bool):
+                        val = "Yes" if val else ""
+                    cell = ws.cell(row=row_i, column=col_i, value=val)
+                    if fill:
+                        cell.fill = fill
+
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+
+        try:
+            wb.save(path)
+            self._set_status(f"Exported {len(self._scan_rows)} rows → {Path(path).name}")
+        except PermissionError:
+            messagebox.showerror(
+                "Save Failed",
+                f"Cannot write to {path}\n\nIs the file open in Excel?")
+
+    # ── Help / About (M27) ─────────────────────────────────────────────────
+
+    def _show_help(self):
+        win = tk.Toplevel(self)
+        win.title("About WebFIRE Deviation Scanner")
+        win.geometry("480x340")
+        win.resizable(False, False)
+        win.configure(bg="white")
+        win.transient(self)
+        win.grab_set()
+
+        tk.Frame(win, bg=C_HEADER, height=6).pack(fill="x")
+
+        tk.Label(win, text="WebFIRE Deviation Scanner",
+                 bg="white", fg=C_HEADER,
+                 font=("Helvetica", 14, "bold")).pack(pady=(18, 4))
+        tk.Label(win, text=f"Version {VERSION}",
+                 bg="white", fg="#64748b",
+                 font=("Helvetica", 10)).pack()
+
+        sep = tk.Frame(win, bg="#e2e8f0", height=1)
+        sep.pack(fill="x", padx=20, pady=14)
+
+        body_text = (
+            "This tool searches EPA WebFIRE for stack test and CEDRI compliance\n"
+            "reports, downloads them, and automatically scans for deviations\n"
+            "from regulatory emission limits.\n\n"
+            "Workflow:\n"
+            "  1. Search WebFIRE using facility name, state, CFR part, or dates.\n"
+            "  2. Select and download the reports you want to review.\n"
+            "  3. Click Scan for Deviations to analyze all downloaded files.\n"
+            "  4. Export results to CSV or XLSX for further analysis.\n\n"
+            "Tip: Use Scan Local Folder to analyze ZIPs from a prior session\n"
+            "without repeating the search step."
+        )
+        tk.Label(win, text=body_text, bg="white", fg="#374151",
+                 font=("Helvetica", 10), justify="left", anchor="w",
+                 padx=24).pack(fill="x")
+
+        tk.Button(win, text="Close", bg=C_BTN_BLUE, fg="white",
+                  font=("Helvetica", 10, "bold"), relief="flat",
+                  padx=16, pady=4, cursor="hand2",
+                  command=win.destroy).pack(pady=(16, 0))
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
+def _agg_result_rank(rows: list) -> int:
+    devs = {r.get("deviation", "") for r in rows}
+    if "YES"           in devs: return 0
+    if "error"         in devs: return 1
+    if "manual-review" in devs: return 2
+    return 3
+
+
 def _cfr_value(display: str) -> str:
-    """Map display label back to form value."""
     for val, label in core.CFR_PART_OPTIONS:
         if label == display or val == display:
             return val
