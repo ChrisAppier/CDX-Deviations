@@ -264,18 +264,18 @@ class App(tk.Tk):
         bar = tk.Frame(self, bg="#e8edf3", pady=5, padx=14)
         bar.pack(fill="x")  # packs between header and scrollable canvas
 
+        ttk.Button(bar, text="  \U0001f4c2  Change Folder\u2026  ",
+                   style="Blue.TButton", cursor="hand2",
+                   command=self._pick_working_folder).pack(side="left")
+
         tk.Label(bar, text="Working Folder:",
                  bg="#e8edf3", fg="#374151",
-                 font=("Helvetica", 9, "bold")).pack(side="left")
+                 font=("Helvetica", 9, "bold")).pack(side="left", padx=(10, 0))
 
         tk.Label(bar, textvariable=self._folder_var,
                  bg="#e8edf3", fg="#1e3a5c",
                  font=("Helvetica", 9), anchor="w").pack(
                      side="left", padx=(6, 0), fill="x", expand=True)
-
-        ttk.Button(bar, text="  Change Folder\u2026  ",
-                   style="Grey.TButton", cursor="hand2",
-                   command=self._pick_working_folder).pack(side="right")
 
     def _pick_working_folder(self):
         chosen = filedialog.askdirectory(
@@ -284,7 +284,7 @@ class App(tk.Tk):
         if chosen:
             self._set_active_folder(Path(chosen))
 
-    def _card(self, parent, step, title, hidden=False):
+    def _card(self, parent, step, title, hidden=False, collapsed=False):
         outer = tk.Frame(parent, bg="#f0f2f5")
         outer.pack(fill="x", pady=(0, 12))
 
@@ -315,17 +315,26 @@ class App(tk.Tk):
                 body.pack(fill="x")
                 arrow_lbl.configure(text=" ▼ ")
 
+        def _expand():
+            if not body.winfo_ismapped():
+                body.pack(fill="x")
+                arrow_lbl.configure(text=" ▼ ")
+
         for w in (hdr, badge, title_lbl, arrow_lbl):
             w.bind("<Button-1>", _toggle)
 
         if hidden:
             outer.pack_forget()
-        return outer, body
+        if collapsed:
+            body.pack_forget()
+            arrow_lbl.configure(text=" ▶ ")
+
+        return outer, body, _expand
 
     # ── Step 1: Search ─────────────────────────────────────────────────────
 
     def _build_search_section(self):
-        self._search_card, body = self._card(self._main, 1, "SEARCH PARAMETERS")
+        self._search_card, body, _ = self._card(self._main, 1, "SEARCH PARAMETERS")
         body.configure(padx=14, pady=12)
 
         # Row 0
@@ -413,8 +422,8 @@ class App(tk.Tk):
     # ── Step 2: Results ────────────────────────────────────────────────────
 
     def _build_results_section(self):
-        self._results_card, body = self._card(
-            self._main, 2, "SEARCH RESULTS")
+        self._results_card, body, self._expand_results = self._card(
+            self._main, 2, "SEARCH RESULTS", collapsed=True)
         body.configure(padx=0, pady=0)
 
         # Toolbar
@@ -440,16 +449,16 @@ class App(tk.Tk):
         self._btn_download.pack(side="right", padx=6)
 
         # Treeview
-        cols = ("chk", "facility", "org", "city", "st",
+        cols = ("chk", "facility", "city", "st",
                 "date", "type", "subtype", "pollutants", "status")
         self._res_tree = ttk.Treeview(
             body, columns=cols, show="headings", height=10, selectmode="none")
 
-        widths = {"chk": 28, "facility": 200, "org": 180, "city": 100,
+        widths = {"chk": 28, "facility": 200, "city": 100,
                   "st": 36, "date": 100, "type": 52, "subtype": 70,
                   "pollutants": 160, "status": 90}
         # H7 — sortable headings for results tree
-        self._res_heads = {"chk": "", "facility": "Facility", "org": "Organization",
+        self._res_heads = {"chk": "", "facility": "Facility",
                            "city": "City", "st": "St", "date": "Date",
                            "type": "Type", "subtype": "Sub",
                            "pollutants": "Pollutants", "status": "Status"}
@@ -457,7 +466,7 @@ class App(tk.Tk):
             self._res_tree.heading(c, text=self._res_heads[c],
                                    command=lambda col=c: self._on_res_sort(col))
             self._res_tree.column(c, width=widths[c],
-                                  stretch=(c in ("facility", "org", "pollutants")))
+                                  stretch=(c in ("facility", "pollutants")))
 
         self._res_tree.tag_configure("cached", background=C_CACHED_BG)
 
@@ -481,8 +490,8 @@ class App(tk.Tk):
     # ── Step 3: Download progress ──────────────────────────────────────────
 
     def _build_download_section(self):
-        self._dl_card, body = self._card(
-            self._main, 3, "DOWNLOAD PROGRESS")
+        self._dl_card, body, self._expand_dl = self._card(
+            self._main, 3, "DOWNLOAD PROGRESS", collapsed=True)
         body.configure(padx=14, pady=10)
 
         prog_row = tk.Frame(body, bg="white")
@@ -528,8 +537,8 @@ class App(tk.Tk):
     # ── Step 4: Scan ───────────────────────────────────────────────────────
 
     def _build_scan_section(self):
-        self._scan_card, body = self._card(
-            self._main, 4, "DEVIATION SCAN", hidden=False)
+        self._scan_card, body, self._expand_scan = self._card(
+            self._main, 4, "DEVIATION SCAN", collapsed=True)
         body.configure(padx=0, pady=0)
 
         # ── Toolbar ─────────────────────────────────────────────────────────
@@ -615,7 +624,7 @@ class App(tk.Tk):
         self._tree_frame = tk.Frame(body, bg="white")
         self._tree_frame.pack(fill="both", expand=True)
 
-        scols = ("result", "facility", "st", "date", "type",
+        scols = ("frs_id", "result", "facility", "st", "date", "type",
                  "location", "pollutant", "measured", "limit",
                  "pct", "notes")
         self._scan_tree = ttk.Treeview(
@@ -626,15 +635,16 @@ class App(tk.Tk):
 
         # H15 — headings with sort direction tracking
         self._scan_heads = {
-            "result":   "Result",   "facility": "Facility",
-            "st":       "St",       "date":     "Date",
-            "type":     "Type",     "location": "Location / Sheet",
+            "frs_id":   "FRS ID",   "result":   "Result",
+            "facility": "Facility", "st":       "St",
+            "date":     "Date",     "type":     "Type",
+            "location": "Location / Sheet",
             "pollutant":"Pollutant / Citation",
             "measured": "Measured", "limit":    "Limit",
             "pct":      "% of Lim", "notes":    "Notes",
         }
-        swidths = {"result": 80, "facility": 180, "st": 36, "date": 90,
-                   "type": 52, "location": 90, "pollutant": 180,
+        swidths = {"frs_id": 80, "result": 80, "facility": 180, "st": 36,
+                   "date": 90, "type": 52, "location": 90, "pollutant": 180,
                    "measured": 80, "limit": 70, "pct": 68,
                    "notes": 300}
         for c in scols:
@@ -857,6 +867,7 @@ class App(tk.Tk):
 
     def _on_search_done(self, reports):
         self._stop_search_spinner()
+        self._expand_results()
 
         self._reports  = reports
         self._selected = {}
@@ -912,7 +923,7 @@ class App(tk.Tk):
             self._res_sort_asc = True
 
         _COL_FIELD = {
-            "facility":  "facility", "org":  "organization",
+            "facility":  "facility",
             "city":      "city",     "st":   "state",
             "date":      "date",     "type": "report_type",
             "subtype":   "report_subtype", "pollutants": "pollutants",
@@ -948,6 +959,7 @@ class App(tk.Tk):
 
         dl_dir = self._active_folder
         dl_dir.mkdir(parents=True, exist_ok=True)
+        self._expand_dl()
 
         self._dl_cancel = False
         self._btn_download.configure(state="disabled")
@@ -1013,10 +1025,10 @@ class App(tk.Tk):
         if rpt["id"] in self._res_tree.get_children():
             vals = list(self._res_tree.item(rpt["id"], "values"))
             if label in ("ok", "cached"):
-                vals[9] = "Downloaded"
+                vals[8] = "Downloaded"
                 self._res_tree.item(rpt["id"], values=vals, tags=("cached",))
             elif label.startswith("error"):
-                vals[9] = "Error"
+                vals[8] = "Error"
                 self._res_tree.item(rpt["id"], values=vals)
 
     def _cancel_download(self):
@@ -1040,6 +1052,7 @@ class App(tk.Tk):
                 f"Download complete — {total} report{'s' if total != 1 else ''}")
         # H16 — refresh scan button now that files may exist
         self._refresh_scan_button_state()
+        self._expand_scan()
 
     # ── Scan ───────────────────────────────────────────────────────────────
 
@@ -1164,7 +1177,8 @@ class App(tk.Tk):
         auto_open = bool(deviations or reviews)
         self._scan_tree.insert(
             parent_iid, "end", iid=report_id, open=auto_open,
-            values=(agg_result,
+            values=(first.get("report_id", ""),
+                    agg_result,
                     first.get("facility", ""),
                     first.get("state", ""),
                     str(first.get("date", ""))[:10],
@@ -1181,13 +1195,13 @@ class App(tk.Tk):
             if dev == "error":          child_tag = "error"
             elif dev == "YES":          child_tag = "deviation"
             elif dev == "manual-review":child_tag = "manualreview"
-            elif dev == "no limit":     child_tag = "nolimit"
+            elif dev == "no limit":     child_tag = "manualreview"
             else:                       child_tag = ""
 
             result_label = {
                 "YES":           "DEVIATION",
                 "no":            "Pass",
-                "no limit":      "No Limit",
+                "no limit":      "Manual Review",
                 "error":         "Error",
                 "manual-review": "Manual Review",  # M17
                 "count-only":    "Count Only",
@@ -1211,7 +1225,8 @@ class App(tk.Tk):
 
             self._scan_tree.insert(
                 report_id, "end", iid=child_iid,
-                values=(result_label,
+                values=("",
+                        result_label,
                         "",
                         "",
                         "",
@@ -1315,7 +1330,7 @@ class App(tk.Tk):
         filtered_groups = []
         for rid, rows in groups.items():
             if filter_result == "Pass":
-                matched = [r for r in rows if r.get("deviation") in ("no", "no limit")]
+                matched = [r for r in rows if r.get("deviation") == "no"]
             elif filter_dev:
                 matched = [r for r in rows if r.get("deviation") == filter_dev]
             else:
@@ -1330,6 +1345,7 @@ class App(tk.Tk):
                 filtered_groups.append((rid, matched))
 
         _COL_KEY = {
+            "frs_id":   lambda g: str(g[0]).lower(),
             "result":   lambda g: _agg_result_rank(g[1]),
             "facility": lambda g: str(g[1][0].get("facility", "")).lower(),
             "st":       lambda g: str(g[1][0].get("state", "")).lower(),
@@ -1426,7 +1442,7 @@ class App(tk.Tk):
 
         for rid, rows in groups.items():
             if filter_result == "Pass":
-                matched = [r for r in rows if r.get("deviation") in ("no", "no limit")]
+                matched = [r for r in rows if r.get("deviation") == "no"]
             elif filter_dev:
                 matched = [r for r in rows if r.get("deviation") == filter_dev]
             else:
@@ -1461,9 +1477,11 @@ class App(tk.Tk):
             "n_runs", "avg_measured", "limit", "pct_of_limit", "regulation",
             "sheet", "description",
         ]
+        # Rename report_id → frs_id in the CSV header
+        header_labels = ["frs_id"] + fields[1:]
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-            writer.writeheader()
+            f.write(",".join(header_labels) + "\r\n")
             writer.writerows(rows_to_export)
         self._set_status(f"Exported {len(rows_to_export)} rows → {Path(path).name}")
 
@@ -1771,7 +1789,7 @@ class App(tk.Tk):
         self._res_tree.insert(
             "", "end", iid=r["id"],
             values=(chk,
-                    r["facility"], r["organization"],
+                    r["facility"],
                     r["city"], r["state"],
                     r["date"][:10],
                     r["report_type"], r["report_subtype"],
@@ -1827,7 +1845,7 @@ class App(tk.Tk):
 
 def _aggregate_report_status(rows: list) -> str:
     """Return extraction subfolder name for a group of findings from one report.
-    Priority: YES > manual-review > error > no/no limit/count-only
+    Priority: YES > manual-review > error > no/count-only
     """
     devs = {r.get("deviation", "") for r in rows}
     if "YES"           in devs: return "Deviations"

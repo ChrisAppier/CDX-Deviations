@@ -1117,8 +1117,8 @@ def _st_row(meta: dict, loc: str, poll: str, unit: str,
         "limit":        lim if lim is not None else "",
         "pct_of_limit": round(avg / lim * 100, 1) if lim else "",
         "regulation":   reg,
-        "deviation":    ("YES" if avg > lim else "no") if lim is not None else "no limit",
-        "error":        "",
+        "deviation":    ("YES" if avg > lim else "no") if lim is not None else "manual-review",
+        "error":        "" if lim is not None else "No emission limit found in report XML — verify applicable limit manually.",
     }
 
 
