@@ -340,9 +340,12 @@ def extract_file_meta(zip_path: Path) -> dict:
                 try:
                     # Templates use either "Company_Information" or
                     # "Facility Information" depending on the subpart.
+                    _FAC_SHEET_NAMES = {
+                        "Company_Information", "Facility Information",
+                        "Site Information", "Company Information", "Site_Information",
+                    }
                     fac_sheet = next(
-                        (s for s in wb.sheetnames
-                         if s in ("Company_Information", "Facility Information")),
+                        (s for s in wb.sheetnames if s in _FAC_SHEET_NAMES),
                         None)
                     if fac_sheet is None:
                         return empty

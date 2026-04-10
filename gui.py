@@ -1466,6 +1466,8 @@ class App(tk.Tk):
                             original_name = Path(member).name
                             if not original_name:   # skip directory entries
                                 continue
+                            if original_name.lower() == "metadata.xml":
+                                continue
                             out_path = target_dir / f"{rid}_{original_name}"
                             out_path.write_bytes(zf.read(member))
                     extracted_counts[subfolder] += 1
